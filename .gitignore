@@ -12,6 +12,8 @@ env/
 dist/
 build/
 *.egg-info/
+backend/static/*
+!backend/static/.gitkeep
 
 # IDE
 .vscode/

@@ -8,9 +8,12 @@ from contextlib import asynccontextmanager
 from typing import Callable
 from collections import defaultdict
 
+from pathlib import Path
+
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from config import get_settings
@@ -211,6 +214,28 @@ app.include_router(insights.router, prefix="/api/v1", tags=["Insights"])
 
 # WebSocket router
 app.include_router(websocket.router, prefix="/api/v1", tags=["WebSocket"])
+
+
+# Static files and SPA fallback (for production deployment)
+# Mount static files if directory exists (frontend build output)
+STATIC_DIR = Path(__file__).parent.parent / "static"
+if STATIC_DIR.exists():
+    # Serve static assets (JS, CSS, images)
+    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+
+    # SPA fallback - serve index.html for all non-API routes
+    @app.get("/{path:path}")
+    async def spa_fallback(path: str):
+        """Serve React SPA for all non-API routes."""
+        # Don't intercept API routes
+        if path.startswith("api/") or path in ["health", "ready", "docs", "openapi.json", "redoc"]:
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+        # Serve index.html for SPA routing
+        index_file = STATIC_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(index_file)
+        return JSONResponse(status_code=404, content={"detail": "Frontend not deployed"})
 
 
 if __name__ == "__main__":

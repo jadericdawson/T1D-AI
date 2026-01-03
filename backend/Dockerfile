@@ -1,4 +1,5 @@
 # T1D-AI Backend Dockerfile
+# Serves both API and static frontend files
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -15,6 +16,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY src/ ./src/
+
+# Copy static frontend files (built separately and copied before docker build)
+COPY static/ ./static/
 
 # Create models directory
 RUN mkdir -p /app/models
