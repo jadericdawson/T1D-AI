@@ -1,0 +1,44 @@
+# T1D-AI Backend Dependencies
+
+# FastAPI and server
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.19
+
+# Pydantic for settings and validation
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Azure SDKs
+azure-cosmos==4.9.0
+azure-storage-blob==12.24.0
+azure-identity==1.19.0
+openai==1.58.1
+
+# ML/AI
+torch==2.5.1
+numpy==2.2.1
+pandas==2.2.3
+scikit-learn==1.6.1
+
+# Authentication
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+msal==1.31.1
+
+# HTTP client
+httpx==0.28.1
+aiohttp==3.11.11
+
+# Utilities
+python-dateutil==2.9.0
+pytz==2024.2
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.2
+httpx==0.28.1
+
+# Development
+black==24.10.0
+ruff==0.8.4

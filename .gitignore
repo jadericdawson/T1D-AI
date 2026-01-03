@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.env
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Test
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Data files (keep example, ignore actual data)
+data/*.jsonl
+data/*.csv
+!data/.gitkeep
+
+# Model files (too large for git)
+backend/ml/models_data/*.pth
+backend/ml/models_data/*.pkl
+!backend/ml/models_data/.gitkeep
+
+# Secrets
+*.pem
+*.key
+credentials.json
+tokens.json
+
+# Docker
+docker-compose.override.yml
+
+# Environment
+.env
+.env.local
+.env.*.local

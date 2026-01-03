@@ -1,0 +1,96 @@
+version: '3.8'
+
+# Production Docker Compose for T1D-AI
+# Deploy with: docker-compose -f docker-compose.prod.yml up -d
+
+services:
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: t1d-ai-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app/src
+      # Azure Services (from .env or secrets)
+      - COSMOS_ENDPOINT=${COSMOS_ENDPOINT}
+      - COSMOS_KEY=${COSMOS_KEY}
+      - COSMOS_DATABASE=${COSMOS_DATABASE:-T1D-AI-DB}
+      - STORAGE_ACCOUNT_URL=${STORAGE_ACCOUNT_URL}
+      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING}
+      # Azure OpenAI
+      - GPT41_ENDPOINT=${GPT41_ENDPOINT}
+      - AZURE_OPENAI_KEY=${AZURE_OPENAI_KEY}
+      - GPT41_DEPLOYMENT=${GPT41_DEPLOYMENT:-H4D_Assistant_gpt-4.1}
+      - AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}
+      # Auth
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - B2C_TENANT_NAME=${B2C_TENANT_NAME:-}
+      - B2C_CLIENT_ID=${B2C_CLIENT_ID:-}
+      - B2C_CLIENT_SECRET=${B2C_CLIENT_SECRET:-}
+      # ML
+      - MODEL_DEVICE=${MODEL_DEVICE:-cpu}
+      # Security
+      - DEBUG=false
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-60}
+    volumes:
+      - ./models:/app/models:ro  # Read-only model files
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # React Frontend (Production)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: t1d-ai-frontend
+    ports:
+      - "80:80"
+    environment:
+      - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+networks:
+  default:
+    name: t1d-ai-network
+    driver: bridge
+
+# For production with HTTPS, add a reverse proxy like Traefik or nginx-proxy
+# Example Traefik labels can be added to frontend service:
+#   labels:
+#     - "traefik.enable=true"
+#     - "traefik.http.routers.t1dai.rule=Host(`t1d-ai.yourdomain.com`)"
+#     - "traefik.http.routers.t1dai.tls.certresolver=letsencrypt"

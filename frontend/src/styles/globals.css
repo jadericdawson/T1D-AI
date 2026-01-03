@@ -1,0 +1,348 @@
+/* T1D-AI Global Styles
+ * Combines KnowlEdge2 shadcn/ui base with JaderBot glassmorphism
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=Inter:wght@300;400;500;600;700&family=Orbitron:wght@400;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==================== CSS Custom Properties ==================== */
+@layer base {
+  :root {
+    /* shadcn/ui light mode (unused, but defined) */
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 195 100% 50%;  /* Cyan #00c6ff */
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 195 100% 50%;
+    --radius: 0.5rem;
+
+    /* T1D-AI Glucose Ranges */
+    --glucose-critical-low: #dc2626;
+    --glucose-low: #f97316;
+    --glucose-in-range: #00c6ff;
+    --glucose-high: #eab308;
+    --glucose-critical-high: #dc2626;
+
+    /* T1D-AI Metrics */
+    --iob-color: #3b82f6;
+    --cob-color: #14b8a6;
+    --isf-color: #8b5cf6;
+    --insulin-color: #f97316;
+    --carbs-color: #22c55e;
+    --prediction-color: #a855f7;
+
+    /* JaderBot Glassmorphism */
+    --glass-bg: rgba(10, 10, 20, 0.6);
+    --glass-border: rgba(255, 255, 255, 0.1);
+    --glow-color: rgba(0, 198, 255, 0.3);
+    --primary-color: #00c6ff;
+    --text-primary: #e0e0e0;
+    --text-secondary: #a0a0b0;
+  }
+
+  /* Dark mode - default for T1D-AI */
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 195 100% 50%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 195 100% 50%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  html {
+    @apply dark;
+  }
+}
+
+/* ==================== Animated Star Background ==================== */
+.background-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  background: #000 url('https://www.script-tutorials.com/demos/360/images/stars.png') repeat top center;
+}
+
+.stars {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.twinkling {
+  width: 100%;
+  height: 100%;
+  background: transparent url('https://www.script-tutorials.com/demos/360/images/twinkling.png') repeat top center;
+  animation: move-twink-back 200s linear infinite;
+}
+
+@keyframes move-twink-back {
+  from { background-position: 0 0; }
+  to { background-position: -10000px 5000px; }
+}
+
+/* ==================== Glassmorphism Components ==================== */
+.glass-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-radius: 15px;
+  border: 1px solid var(--glass-border);
+  padding: 24px;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.glass-card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 10px 30px var(--glow-color);
+}
+
+.glass-panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--glass-border);
+}
+
+/* ==================== Glucose Display ==================== */
+.glucose-value {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 4rem;
+  font-weight: 700;
+  text-shadow: 0 0 20px currentColor;
+}
+
+.glucose-critical-low { color: var(--glucose-critical-low); }
+.glucose-low { color: var(--glucose-low); }
+.glucose-in-range { color: var(--glucose-in-range); }
+.glucose-high { color: var(--glucose-high); }
+.glucose-critical-high { color: var(--glucose-critical-high); }
+
+/* Trend arrows */
+.trend-arrow {
+  font-size: 2rem;
+  margin-left: 0.5rem;
+}
+
+/* ==================== Metric Cards ==================== */
+.metric-card {
+  @apply glass-card;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+}
+
+.metric-value {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 2rem;
+  font-weight: 600;
+}
+
+.metric-label {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-top: 0.5rem;
+}
+
+.metric-iob .metric-value { color: var(--iob-color); }
+.metric-cob .metric-value { color: var(--cob-color); }
+.metric-isf .metric-value { color: var(--isf-color); }
+
+/* ==================== Prediction Cards ==================== */
+.prediction-card {
+  @apply glass-card;
+  border-left: 4px solid var(--prediction-color);
+}
+
+.prediction-value {
+  font-family: 'Inter', sans-serif;
+  font-size: 1.25rem;
+  font-weight: 500;
+}
+
+/* ==================== Buttons ==================== */
+.btn-primary {
+  background: linear-gradient(135deg, #00c6ff 0%, #0072ff 100%);
+  color: white;
+  font-weight: 600;
+  padding: 14px 32px;
+  border-radius: 50px;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.btn-primary:hover {
+  opacity: 0.9;
+  transform: translateY(-2px);
+  box-shadow: 0 10px 30px var(--glow-color);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--glass-border);
+  color: var(--text-primary);
+  font-weight: 500;
+  padding: 12px 28px;
+  border-radius: 50px;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+.btn-secondary:hover {
+  background: rgba(0, 198, 255, 0.1);
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
+/* ==================== Custom Scrollbar ==================== */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--primary-color);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #00a8d6;
+}
+
+/* ==================== Animations ==================== */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes glow {
+  0%, 100% { box-shadow: 0 0 5px var(--primary-color), 0 0 10px var(--primary-color); }
+  50% { box-shadow: 0 0 20px var(--primary-color), 0 0 30px var(--primary-color); }
+}
+
+@keyframes pulse-glow {
+  0% { box-shadow: 0 0 0 0 rgba(0, 198, 255, 0.5); }
+  70% { box-shadow: 0 0 0 15px rgba(0, 198, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(0, 198, 255, 0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.5s ease-out forwards;
+}
+
+.animate-glow {
+  animation: glow 2s ease-in-out infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-out infinite;
+}
+
+/* ==================== Chart Styles ==================== */
+.glucose-chart {
+  @apply glass-panel;
+  border-radius: 16px;
+  padding: 20px;
+}
+
+/* ==================== Landing Page ==================== */
+.hero-gradient {
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+}
+
+.hero-title {
+  font-family: 'Playfair Display', serif;
+  font-size: 3.5rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, #00c6ff 0%, #0072ff 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero-subtitle {
+  font-family: 'Inter', sans-serif;
+  font-size: 1.25rem;
+  color: var(--text-secondary);
+  max-width: 600px;
+  line-height: 1.8;
+}
+
+/* ==================== Responsive ==================== */
+@media (max-width: 768px) {
+  .glucose-value {
+    font-size: 3rem;
+  }
+
+  .hero-title {
+    font-size: 2.5rem;
+  }
+
+  .glass-card {
+    padding: 16px;
+  }
+}

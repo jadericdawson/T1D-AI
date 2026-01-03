@@ -1,0 +1,74 @@
+version: '3.8'
+
+# Development Docker Compose for T1D-AI
+# Run with: docker-compose up
+
+services:
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: t1d-ai-backend-dev
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app/src
+      # Azure Services
+      - COSMOS_ENDPOINT=${COSMOS_ENDPOINT}
+      - COSMOS_KEY=${COSMOS_KEY}
+      - COSMOS_DATABASE=${COSMOS_DATABASE:-T1D-AI-DB}
+      - STORAGE_ACCOUNT_URL=${STORAGE_ACCOUNT_URL}
+      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING}
+      # Azure OpenAI
+      - GPT41_ENDPOINT=${GPT41_ENDPOINT}
+      - AZURE_OPENAI_KEY=${AZURE_OPENAI_KEY}
+      - GPT41_DEPLOYMENT=${GPT41_DEPLOYMENT:-H4D_Assistant_gpt-4.1}
+      - AZURE_OPENAI_API_VERSION=2024-12-01-preview
+      # Auth
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev_secret_key_change_in_production}
+      # ML
+      - MODEL_DEVICE=cpu
+      # Development settings
+      - DEBUG=true
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+      - RATE_LIMIT_PER_MINUTE=120
+    volumes:
+      - ./backend/src:/app/src
+      - ./models:/app/models
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  # React Frontend (development with hot reload)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: t1d-ai-frontend-dev
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+      - VITE_WS_URL=ws://localhost:8000
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+      - ./frontend/tailwind.config.ts:/app/tailwind.config.ts
+      - /app/node_modules
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  default:
+    name: t1d-ai-network
