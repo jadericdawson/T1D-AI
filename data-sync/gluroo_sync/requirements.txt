@@ -1,0 +1,5 @@
+# Gluroo Sync Azure Function Dependencies
+azure-functions>=1.17.0
+azure-cosmos>=4.5.0
+cryptography>=41.0.0
+httpx>=0.25.0

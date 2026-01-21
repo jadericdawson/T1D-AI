@@ -227,8 +227,237 @@ class GlurooService:
             sourceId=source_id
         )
 
+    async def push_treatment(
+        self,
+        treatment_type: str,  # "insulin" or "carbs"
+        value: float,
+        timestamp: Optional[datetime] = None,
+        notes: Optional[str] = None,
+        protein: Optional[float] = None,
+        fat: Optional[float] = None,
+        glycemic_index: Optional[int] = None,
+        absorption_rate: Optional[str] = None,
+        is_liquid: Optional[bool] = None
+    ) -> Tuple[bool, str, Optional[dict]]:
+        """
+        Push a treatment (insulin or carbs) to Gluroo via Nightscout API.
+
+        Args:
+            treatment_type: "insulin" or "carbs"
+            value: Amount (units for insulin, grams for carbs)
+            timestamp: When the treatment occurred (defaults to now)
+            notes: Optional notes about the treatment
+            protein: Protein in grams (for carb treatments)
+            fat: Fat in grams (for carb treatments)
+            glycemic_index: GI value from AI enrichment
+            absorption_rate: Absorption speed (very_slow, slow, medium, fast, very_fast)
+            is_liquid: Whether the food is liquid
+
+        Returns:
+            Tuple of (success, message, response_data)
+        """
+        url = f"{self.base_url}/api/v1/treatments"
+
+        # Build treatment payload
+        if timestamp is None:
+            timestamp = datetime.now(timezone.utc)
+
+        # Nightscout treatment format
+        treatment_data = {
+            "created_at": timestamp.isoformat(),
+            "enteredBy": "T1D-AI",
+        }
+
+        if treatment_type == "insulin":
+            treatment_data["eventType"] = "Correction Bolus"
+            treatment_data["insulin"] = value
+        elif treatment_type == "carbs":
+            treatment_data["eventType"] = "Carb Correction"
+            treatment_data["carbs"] = value
+            # Add macros if available (Nightscout supports these)
+            if protein is not None and protein > 0:
+                treatment_data["protein"] = protein
+            if fat is not None and fat > 0:
+                treatment_data["fat"] = fat
+        else:
+            return False, f"Invalid treatment type: {treatment_type}", None
+
+        # Build enriched notes with GI info
+        note_parts = []
+        if notes:
+            note_parts.append(notes)
+        if glycemic_index is not None:
+            note_parts.append(f"GI:{glycemic_index}")
+        if absorption_rate:
+            note_parts.append(f"[{absorption_rate}]")
+        if is_liquid:
+            note_parts.append("[liquid]")
+
+        if note_parts:
+            treatment_data["notes"] = " ".join(note_parts)
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    url,
+                    headers={**self.headers, "Content-Type": "application/json"},
+                    json=treatment_data
+                )
+
+                if response.status_code in [200, 201]:
+                    result = response.json() if response.text else {}
+                    logger.info(f"Pushed {treatment_type} treatment to Gluroo: {value}")
+                    return True, "Treatment pushed successfully", result
+                elif response.status_code == 401:
+                    return False, "Unauthorized - check API secret", None
+                elif response.status_code == 403:
+                    return False, "Forbidden - API may be read-only", None
+                else:
+                    return False, f"HTTP {response.status_code}: {response.text}", None
+
+        except httpx.TimeoutException:
+            return False, "Connection timeout", None
+        except Exception as e:
+            logger.error(f"Error pushing treatment to Gluroo: {e}")
+            return False, f"Error: {str(e)}", None
+
+    async def delete_treatment(
+        self,
+        nightscout_id: Optional[str] = None,
+        timestamp: Optional[datetime] = None,
+        treatment_type: Optional[str] = None,
+        value: Optional[float] = None
+    ) -> Tuple[bool, str]:
+        """
+        Delete a treatment from Gluroo via Nightscout API.
+
+        Can delete by:
+        - nightscout_id: Direct deletion by Nightscout _id
+        - timestamp + treatment_type + value: Find and delete matching treatment
+
+        Args:
+            nightscout_id: The Nightscout _id (if known from previous push)
+            timestamp: When the treatment occurred
+            treatment_type: "insulin" or "carbs"
+            value: Amount (for matching)
+
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # If we have the Nightscout ID, delete directly
+                if nightscout_id:
+                    url = f"{self.base_url}/api/v1/treatments/{nightscout_id}"
+                    response = await client.delete(url, headers=self.headers)
+
+                    if response.status_code in [200, 204]:
+                        logger.info(f"Deleted treatment {nightscout_id} from Gluroo")
+                        return True, "Treatment deleted successfully"
+                    elif response.status_code == 404:
+                        # Treatment not found in Gluroo - could be already deleted there
+                        # Treat this as success since the end goal (treatment not in Gluroo) is achieved
+                        logger.info(f"Treatment {nightscout_id} not found in Gluroo (may be already deleted)")
+                        return True, "Treatment not found in Gluroo (already deleted?)"
+                    else:
+                        return False, f"HTTP {response.status_code}: {response.text}"
+
+                # Otherwise, search for matching treatment and delete
+                elif timestamp and treatment_type:
+                    # Search for treatments in a 10-minute window around the timestamp
+                    from datetime import timedelta
+
+                    # Ensure timestamp is timezone-aware (assume UTC if naive)
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=timezone.utc)
+
+                    window_start = timestamp - timedelta(minutes=5)
+                    window_end = timestamp + timedelta(minutes=5)
+
+                    logger.info(f"Gluroo delete: looking for {treatment_type}={value} at {timestamp.isoformat()}")
+                    logger.info(f"Gluroo delete: search window {window_start.isoformat()} to {window_end.isoformat()}")
+
+                    # Format timestamps for Nightscout API - use mills (milliseconds) for reliable searching
+                    # Use UTC timestamp to get correct milliseconds
+                    window_start_ms = int(window_start.timestamp() * 1000)
+                    window_end_ms = int(window_end.timestamp() * 1000)
+                    logger.info(f"Gluroo delete: mills range {window_start_ms} to {window_end_ms}")
+
+                    # Map treatment type to Nightscout eventType (same as sync uses)
+                    event_type = "Correction%20Bolus" if treatment_type == "insulin" else "Carb%20Correction"
+
+                    # Search by mills AND eventType (matching how sync pulls treatments)
+                    search_url = (
+                        f"{self.base_url}/api/v1/treatments.json?"
+                        f"find[eventType]={event_type}&"
+                        f"find[mills][$gte]={window_start_ms}&"
+                        f"find[mills][$lte]={window_end_ms}&count=50"
+                    )
+
+                    logger.info(f"Gluroo delete search URL: {search_url}")
+                    search_response = await client.get(search_url, headers=self.headers)
+
+                    if search_response.status_code != 200:
+                        logger.warning(f"Gluroo search failed: {search_response.status_code} - {search_response.text}")
+                        return False, f"Search failed: HTTP {search_response.status_code}"
+
+                    treatments = search_response.json() or []
+                    logger.info(f"Gluroo delete: found {len(treatments)} treatments in search window")
+
+                    # Log each treatment for debugging
+                    for t in treatments:
+                        t_type = "insulin" if t.get("insulin") else "carbs" if t.get("carbs") else "unknown"
+                        t_value = t.get("insulin") or t.get("carbs") or 0
+                        t_created = t.get("created_at", "unknown")
+                        t_id = t.get("_id", "unknown")
+                        logger.info(f"  - Gluroo treatment: _id={t_id}, type={t_type}, value={t_value}, created_at={t_created}")
+
+                    # Find matching treatment by type and value
+                    # Don't require enteredBy match - treatment may have been synced originally from Gluroo
+                    logger.info(f"Gluroo delete: looking for type={treatment_type}, value={value}")
+                    for t in treatments:
+                        t_type = "insulin" if t.get("insulin") else "carbs" if t.get("carbs") else None
+                        t_value = t.get("insulin") or t.get("carbs")
+                        logger.info(f"Gluroo delete: checking t_type={t_type}, t_value={t_value}")
+
+                        # Match by type and value (with small tolerance for floating point)
+                        if (t_type == treatment_type and
+                            abs(float(t_value or 0) - float(value or 0)) < 0.1):
+                            logger.info(f"Gluroo delete: MATCH FOUND!")
+
+                            # Found it, delete
+                            t_id = t.get("_id")
+                            if t_id:
+                                logger.info(f"Found matching treatment {t_id} ({t_type}={t_value}), deleting...")
+                                del_url = f"{self.base_url}/api/v1/treatments/{t_id}"
+                                del_response = await client.delete(del_url, headers=self.headers)
+
+                                if del_response.status_code in [200, 204]:
+                                    logger.info(f"Successfully deleted treatment {t_id} from Gluroo")
+                                    return True, "Treatment deleted successfully"
+                                else:
+                                    logger.warning(f"Delete failed: {del_response.status_code} - {del_response.text}")
+
+                    # No matching treatment found - could be already deleted
+                    logger.info(f"No matching {treatment_type}={value} found in Gluroo (may be already deleted)")
+                    return True, "Treatment not found in Gluroo (already deleted?)"
+                else:
+                    return False, "Need either nightscout_id or timestamp+type+value to delete"
+
+        except httpx.TimeoutException:
+            return False, "Connection timeout"
+        except Exception as e:
+            logger.error(f"Error deleting treatment from Gluroo: {e}")
+            return False, f"Error: {str(e)}"
+
     def _parse_treatment_entry(self, entry: dict, user_id: str) -> Optional[Treatment]:
         """Parse a raw Gluroo treatment entry into a Treatment."""
+        # Skip treatments that originated from T1D-AI to prevent duplicates
+        entered_by = entry.get('enteredBy', '')
+        if entered_by == 'T1D-AI':
+            logger.debug(f"Skipping T1D-AI originated treatment to prevent duplicate")
+            return None
+
         event_type = entry.get('eventType', '')
 
         # Determine treatment type
@@ -273,6 +502,57 @@ class GlurooService:
             source="gluroo",
             sourceId=source_id
         )
+
+
+def dedupe_treatments(treatments: List[Treatment], window_minutes: int = 5) -> List[Treatment]:
+    """
+    Deduplicate treatments that appear as multiple events within a short window.
+
+    Gluroo sometimes reports the same insulin/carb event multiple times within
+    a short period. This groups treatments by type and value within a time window,
+    keeping only the first occurrence.
+
+    Args:
+        treatments: List of Treatment objects
+        window_minutes: Time window in minutes to consider as same event
+
+    Returns:
+        Deduplicated list of treatments
+    """
+    if not treatments:
+        return []
+
+    # Sort by timestamp
+    sorted_treatments = sorted(treatments, key=lambda t: t.timestamp)
+    deduped = []
+
+    for treatment in sorted_treatments:
+        # Check if this is a duplicate of a recent treatment
+        is_dupe = False
+        for existing in reversed(deduped):
+            # Only compare within the time window
+            time_diff = (treatment.timestamp - existing.timestamp).total_seconds() / 60
+            if time_diff > window_minutes:
+                break  # Outside window, stop checking
+
+            # Check if same type and value
+            if treatment.type == existing.type:
+                if treatment.type == TreatmentType.INSULIN:
+                    if treatment.insulin == existing.insulin:
+                        is_dupe = True
+                        break
+                elif treatment.type == TreatmentType.CARBS:
+                    if treatment.carbs == existing.carbs:
+                        is_dupe = True
+                        break
+
+        if not is_dupe:
+            deduped.append(treatment)
+
+    if len(deduped) < len(treatments):
+        logger.info(f"Deduped treatments: {len(treatments)} -> {len(deduped)}")
+
+    return deduped
 
 
 async def create_gluroo_service(base_url: str, api_secret: str) -> GlurooService:

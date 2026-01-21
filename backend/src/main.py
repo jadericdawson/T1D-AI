@@ -81,9 +81,65 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+import asyncio
+
+# Global task reference for Gluroo sync
+_gluroo_sync_task = None
+
+
+async def run_gluroo_sync_loop():
+    """Background task to sync from Gluroo every 5 minutes.
+
+    Handles both legacy user-based sync and profile-based multi-person sync.
+    """
+    from services.gluroo_sync import GlurooSyncService, PROFILE_SYNC_AVAILABLE
+
+    # Import profile-based sync if available
+    profile_service = None
+    if PROFILE_SYNC_AVAILABLE:
+        from services.gluroo_sync import ProfileBasedSyncService
+        profile_service = ProfileBasedSyncService()
+        logger.info("Profile-based sync enabled")
+
+    legacy_service = GlurooSyncService()
+    logger.info("Gluroo sync background task started (legacy + profile-based)")
+
+    while True:
+        try:
+            # Run legacy sync (for users without profiles)
+            try:
+                glucose_count, treatment_count = await legacy_service.sync_once()
+                if glucose_count > 0 or treatment_count > 0:
+                    logger.info(f"Legacy sync: {glucose_count} glucose, {treatment_count} treatments")
+                else:
+                    logger.debug("Legacy sync: No new data")
+            except Exception as e:
+                logger.error(f"Legacy sync error: {e}")
+
+            # Run profile-based sync (for users with profiles)
+            if profile_service:
+                try:
+                    result = await profile_service.sync_once()
+                    if result.get("glucose", 0) > 0 or result.get("treatments", 0) > 0:
+                        logger.info(
+                            f"Profile sync: {result.get('profiles', 0)} profiles, "
+                            f"{result.get('glucose', 0)} glucose, {result.get('treatments', 0)} treatments"
+                        )
+                except Exception as e:
+                    logger.error(f"Profile sync error: {e}")
+
+        except Exception as e:
+            logger.error(f"Gluroo sync error: {e}")
+
+        # Wait 5 minutes before next sync
+        await asyncio.sleep(300)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
+    global _gluroo_sync_task
+
     settings = get_settings()
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     logger.info(f"ML Device: {settings.model_device}")
@@ -115,18 +171,34 @@ async def lifespan(app: FastAPI):
                 models_dir = path
                 break
 
+        logger.info(f"Looking for models in: {models_dir}")
         pred_service = get_prediction_service(models_dir, settings.model_device)
         logger.info(
             f"Prediction service initialized - "
             f"LSTM: {pred_service.lstm_available}, "
-            f"ISF: {pred_service.isf_available}"
+            f"TFT: {pred_service.tft_available}, "
+            f"ISF: {pred_service.isf_available}, "
+            f"Models dir: {models_dir}"
         )
     except Exception as e:
         logger.warning(f"ML service initialization skipped: {e}")
 
+    # Start Gluroo sync background task
+    try:
+        _gluroo_sync_task = asyncio.create_task(run_gluroo_sync_loop())
+        logger.info("Gluroo sync background task scheduled")
+    except Exception as e:
+        logger.warning(f"Gluroo sync task failed to start: {e}")
+
     yield
 
     # Cleanup on shutdown
+    if _gluroo_sync_task:
+        _gluroo_sync_task.cancel()
+        try:
+            await _gluroo_sync_task
+        except asyncio.CancelledError:
+            pass
     logger.info("Shutting down T1D-AI...")
 
 
@@ -192,7 +264,13 @@ async def readiness_check():
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
+    """Root endpoint - serves frontend if available, else API info."""
+    # Check if frontend is deployed
+    static_dir = Path(__file__).parent.parent / "static"
+    index_file = static_dir / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    # Return API info if no frontend
     return {
         "app": settings.app_name,
         "version": settings.app_version,
@@ -201,16 +279,24 @@ async def root():
 
 
 # Import and register API routers
-from api.v1 import glucose, treatments, datasources, predictions, calculations, users, insights, websocket
+from api.v1 import glucose, treatments, datasources, predictions, calculations, users, insights, websocket, sharing, training, profiles, admin
+from auth import auth_router
+
+# Authentication router (no /api prefix for cleaner URLs)
+app.include_router(auth_router, prefix="/api/auth", tags=["Authentication"])
 
 # REST API routers
 app.include_router(glucose.router, prefix="/api/v1/glucose", tags=["Glucose"])
 app.include_router(treatments.router, prefix="/api/v1/treatments", tags=["Treatments"])
 app.include_router(datasources.router, prefix="/api/v1/datasources", tags=["Data Sources"])
+app.include_router(profiles.router, prefix="/api/v1", tags=["Profiles"])
 app.include_router(predictions.router, prefix="/api/v1", tags=["Predictions"])
 app.include_router(calculations.router, prefix="/api/v1", tags=["Calculations"])
 app.include_router(users.router, prefix="/api/v1", tags=["Users"])
 app.include_router(insights.router, prefix="/api/v1", tags=["Insights"])
+app.include_router(sharing.router, prefix="/api/v1", tags=["Sharing"])
+app.include_router(training.router, prefix="/api/v1", tags=["Training"])
+app.include_router(admin.router, prefix="/api/v1", tags=["Admin"])
 
 # WebSocket router
 app.include_router(websocket.router, prefix="/api/v1", tags=["WebSocket"])
@@ -230,6 +316,22 @@ if STATIC_DIR.exists():
         # Don't intercept API routes
         if path.startswith("api/") or path in ["health", "ready", "docs", "openapi.json", "redoc"]:
             return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+        # Check if the requested file exists in static directory (for SVGs, etc.)
+        requested_file = STATIC_DIR / path
+        if requested_file.exists() and requested_file.is_file():
+            # Determine content type
+            suffix = requested_file.suffix.lower()
+            media_types = {
+                ".svg": "image/svg+xml",
+                ".png": "image/png",
+                ".ico": "image/x-icon",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".json": "application/json",
+            }
+            media_type = media_types.get(suffix, "application/octet-stream")
+            return FileResponse(requested_file, media_type=media_type)
 
         # Serve index.html for SPA routing
         index_file = STATIC_DIR / "index.html"

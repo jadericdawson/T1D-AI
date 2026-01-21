@@ -3,7 +3,7 @@ Glucose API Endpoints for T1D-AI
 Provides glucose data, predictions, and metrics.
 """
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from pathlib import Path
 
@@ -12,24 +12,108 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from models.schemas import (
     GlucoseReading, GlucoseWithPredictions, GlucoseCurrentResponse,
     GlucoseHistoryResponse, CurrentMetrics, PredictionAccuracy,
-    GlucosePrediction
+    GlucosePrediction, TFTPrediction, EffectPoint, HistoricalIobCobPoint,
+    TrendDirection
 )
-from database.repositories import GlucoseRepository, TreatmentRepository
+from database.repositories import GlucoseRepository, TreatmentRepository, UserRepository, LearnedISFRepository, UserAbsorptionProfileRepository, LearnedPIRRepository, SharingRepository
 from services.iob_cob_service import IOBCOBService
+from models.schemas import UserAbsorptionProfile
 from services.prediction_service import get_prediction_service, PredictionService
+from services.dexcom_service import DexcomShareService, DexcomGlucoseReading
+from services.metabolic_params_service import get_metabolic_params_service, MetabolicState
 from config import get_settings
+from auth.routes import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Repository instances (would use dependency injection in production)
+# Repository instances
 glucose_repo = GlucoseRepository()
 treatment_repo = TreatmentRepository()
+user_repo = UserRepository()
+learned_isf_repo = LearnedISFRepository()
+learned_pir_repo = LearnedPIRRepository()
+absorption_profile_repo = UserAbsorptionProfileRepository()
+sharing_repo = SharingRepository()
 iob_cob_service = IOBCOBService.from_settings()
+metabolic_params_service = get_metabolic_params_service()
+
+# Dexcom service for direct CGM data
+dexcom_service: Optional[DexcomShareService] = None
+
+def get_dexcom_service() -> Optional[DexcomShareService]:
+    """Get or create Dexcom service (lazy init)."""
+    global dexcom_service
+    if dexcom_service is None:
+        try:
+            dexcom_service = DexcomShareService()
+            logger.info("Initialized Dexcom Share service")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Dexcom service: {e}")
+    return dexcom_service
+
+def dexcom_to_glucose_reading(dexcom_reading: DexcomGlucoseReading, user_id: str) -> GlucoseReading:
+    """Convert Dexcom reading to GlucoseReading schema."""
+    # Map trend description to TrendDirection
+    trend_map = {
+        "rising quickly": TrendDirection.DOUBLE_UP,
+        "rising": TrendDirection.SINGLE_UP,
+        "rising slightly": TrendDirection.FORTY_FIVE_UP,
+        "steady": TrendDirection.FLAT,
+        "falling slightly": TrendDirection.FORTY_FIVE_DOWN,
+        "falling": TrendDirection.SINGLE_DOWN,
+        "falling quickly": TrendDirection.DOUBLE_DOWN,
+    }
+    trend = trend_map.get(dexcom_reading.trend_description.lower(), TrendDirection.FLAT)
+
+    return GlucoseReading(
+        id=f"dexcom-{int(dexcom_reading.timestamp.timestamp() * 1000)}",
+        userId=user_id,
+        value=dexcom_reading.value,
+        timestamp=dexcom_reading.timestamp,
+        trend=trend,
+        source="dexcom"
+    )
 
 
-# Temporary: hardcoded user ID until auth is implemented
-TEMP_USER_ID = "demo_user"
+async def validate_user_access(requester_id: str, target_user_id: str) -> bool:
+    """
+    Check if requester has access to target user's data.
+    Access is granted if:
+    - requester_id == target_user_id (viewing own data)
+    - requester is a parent with target_user_id in their linkedChildIds
+    - target_user has shared their data with requester via the sharing system
+    """
+    try:
+        if requester_id == target_user_id:
+            return True
+
+        # Check if requester is a parent of the target
+        try:
+            requester = await user_repo.get_by_id(requester_id)
+            if requester and requester.linkedChildIds and target_user_id in requester.linkedChildIds:
+                return True
+        except Exception as e:
+            logger.warning(f"Error checking parent-child access: {e}")
+
+        # Check if target user has shared data with requester
+        # This handles two cases:
+        # 1. Direct share: ownerId = target_user_id (user shares their own data)
+        # 2. Profile share: profileId = target_user_id (parent shares child's data)
+        try:
+            share = await sharing_repo.get_share_for_profile(target_user_id, requester_id)
+            if share and share.isActive:
+                # Handle role as enum or string
+                role_str = share.role.value if hasattr(share.role, 'value') else str(share.role)
+                logger.info(f"Access granted via share: {target_user_id} shared with {requester_id} (role: {role_str})")
+                return True
+        except Exception as e:
+            logger.warning(f"Error checking share access: {e}")
+
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error in validate_user_access: {e}")
+        return False
 
 
 def get_pred_service() -> PredictionService:
@@ -44,7 +128,10 @@ def get_pred_service() -> PredictionService:
 
 
 @router.get("/current", response_model=GlucoseCurrentResponse)
-async def get_current_glucose(user_id: str = Query(default=TEMP_USER_ID)):
+async def get_current_glucose(
+    user_id: str = Query(..., description="User ID whose data to view"),
+    current_user = Depends(get_current_user)
+):
     """
     Get current glucose reading with predictions and metrics.
 
@@ -54,25 +141,95 @@ async def get_current_glucose(user_id: str = Query(default=TEMP_USER_ID)):
     - COB (Carbs on Board)
     - ISF (Insulin Sensitivity Factor)
     - Recommended correction dose
+
+    Requires JWT authentication. Users can view their own data or their children's data.
     """
     try:
-        # Get latest glucose reading
-        latest = await glucose_repo.get_latest(user_id)
+        # SECURITY: Always validate access using authenticated user
+        has_access = await validate_user_access(current_user.id, user_id)
+        if not has_access:
+            raise HTTPException(status_code=403, detail="Not authorized to view this user's data")
+
+        # Try Dexcom first for freshest data - BUT ONLY if this user has Dexcom configured
+        # CRITICAL: The global Dexcom service has hardcoded credentials for one user (Emrys)
+        # We must NOT return Dexcom data for users who don't have it set up
+        latest: Optional[GlucoseReading] = None
+        dexcom_svc = get_dexcom_service()
+
+        if dexcom_svc:
+            # Check if this user has any existing Dexcom-sourced readings in the database
+            # This is a proxy for "user has Dexcom configured"
+            # Without this check, ALL users would see Emrys' Dexcom data!
+            try:
+                recent_dexcom_readings = await glucose_repo.get_recent_by_source(user_id, "dexcom", hours=48)
+                user_has_dexcom = len(recent_dexcom_readings) > 0
+
+                if user_has_dexcom:
+                    try:
+                        dexcom_reading = await dexcom_svc.get_latest_reading_async()
+                        if dexcom_reading:
+                            latest = dexcom_to_glucose_reading(dexcom_reading, user_id)
+                            logger.info(f"Got fresh reading from Dexcom: {latest.value} mg/dL")
+                    except Exception as e:
+                        logger.warning(f"Dexcom fetch failed, falling back to Gluroo: {e}")
+                else:
+                    logger.debug(f"User {user_id} has no Dexcom data, skipping Dexcom fetch")
+            except Exception as e:
+                logger.warning(f"Error checking Dexcom status for user: {e}")
+
+        # Fall back to Gluroo/database if Dexcom unavailable or stale
+        gluroo_latest = await glucose_repo.get_latest(user_id)
+
+        if gluroo_latest:
+            # Use Gluroo if no Dexcom data, or if Gluroo is actually fresher
+            if not latest:
+                latest = gluroo_latest
+                logger.info(f"Using Gluroo data: {latest.value} mg/dL")
+            elif gluroo_latest.timestamp > latest.timestamp:
+                latest = gluroo_latest
+                logger.info(f"Gluroo data is fresher, using: {latest.value} mg/dL")
+            else:
+                logger.info(f"Using Dexcom (fresher than Gluroo)")
+
         if not latest:
             raise HTTPException(status_code=404, detail="No glucose data found")
 
         # Get recent treatments for IOB/COB calculation
-        treatments = await treatment_repo.get_recent(user_id, hours=6)
+        # Fetch 30 hours to cover 24hr chart view + 6hr insulin action window
+        treatments = await treatment_repo.get_recent(user_id, hours=30)
 
-        # Calculate IOB and COB
-        iob = iob_cob_service.calculate_iob(treatments)
-        cob = iob_cob_service.calculate_cob(treatments)
+        # Load user's learned absorption profile for personalized activity curves
+        # This replaces hardcoded peak times (75/45/180 min) with learned values
+        absorption_profile: Optional[UserAbsorptionProfile] = None
+        try:
+            absorption_profile = await absorption_profile_repo.get(user_id)
+            if absorption_profile and absorption_profile.confidence > 0.3:
+                logger.info(f"Using learned absorption profile: insulin_peak={absorption_profile.insulinPeakMin}min, "
+                           f"carb_peak={absorption_profile.carbPeakMin}min, protein_peak={absorption_profile.proteinPeakMin}min "
+                           f"(confidence={absorption_profile.confidence:.2f})")
+            else:
+                absorption_profile = None  # Low confidence, use defaults
+                logger.debug("No learned absorption profile (or low confidence), using defaults")
+        except Exception as e:
+            logger.debug(f"Could not load absorption profile: {e}")
+
+        # Determine peak times (learned or default)
+        insulin_peak_min = absorption_profile.insulinPeakMin if absorption_profile else 75.0
+        carb_peak_min = absorption_profile.carbPeakMin if absorption_profile else 45.0
+        protein_peak_min = absorption_profile.proteinPeakMin if absorption_profile else 180.0
+
+        # Calculate IOB, COB, and POB for metric display (instant, no absorption delay)
+        iob = iob_cob_service.calculate_iob(treatments, include_absorption_ramp=False)
+        cob = iob_cob_service.calculate_cob(treatments, include_absorption_ramp=False)
+        pob = iob_cob_service.calculate_pob(treatments)
 
         # Get predictions from ML service
         pred_service = get_pred_service()
 
-        # Get glucose history for LSTM predictions
-        start_time = datetime.utcnow() - timedelta(minutes=120)
+        # Get glucose history for LSTM predictions and historical IOB/COB/BG Pressure visualization
+        # Use 24 hours to support full chart time range (1hr, 3hr, 6hr, 12hr, 24hr)
+        # This allows historical IOB/COB and BG Pressure lines to span the entire viewable period
+        start_time = datetime.utcnow() - timedelta(hours=24)
         glucose_history = await glucose_repo.get_history(user_id, start_time)
 
         # Convert trend to int for prediction
@@ -85,22 +242,70 @@ async def get_current_glucose(user_id: str = Query(default=TEMP_USER_ID)):
             trend_val = trend_map.get(str(latest.trend), 0)
 
         # Generate predictions
+        logger.info(f"Calling predict with {len(glucose_history)} glucose readings, {len(treatments)} treatments, IOB={iob:.2f}, COB={cob:.0f}")
+        logger.info(f"LSTM available: {pred_service.lstm_available}, TFT available: {pred_service.tft_available}")
+
         prediction_result = pred_service.predict(
             current_bg=float(latest.value),
             trend=trend_val,
             iob=iob,
+            cob=cob,
             glucose_history=[r.model_dump() for r in glucose_history],
             treatments=[t.model_dump() for t in treatments]
         )
 
-        # Get ISF from prediction service
-        isf = prediction_result.isf
+        logger.info(f"Prediction result - linear: {prediction_result.linear}, lstm: {prediction_result.lstm}, method: {prediction_result.method}")
 
-        # Calculate metrics with predicted ISF
+        # Get effective ISF with short-term illness detection
+        # Uses metabolic_params_service which combines long-term baseline + recent deviation
+        isf = prediction_result.isf  # Default to model prediction
+        isf_deviation = 0.0
+        metabolic_state = MetabolicState.NORMAL
+        try:
+            # Determine if fasting based on recent COB
+            is_fasting = cob < 5
+            effective_isf = await metabolic_params_service.get_effective_isf(
+                user_id, is_fasting=is_fasting, include_short_term=True
+            )
+            isf = effective_isf.value
+            isf_deviation = effective_isf.deviation_percent
+
+            # Track metabolic state for response
+            if effective_isf.is_sick:
+                metabolic_state = MetabolicState.SICK
+                logger.warning(f"Illness detected for user {user_id}: ISF deviation {isf_deviation:.1f}%")
+            elif effective_isf.is_resistant:
+                metabolic_state = MetabolicState.RESISTANT
+                logger.info(f"Insulin resistance detected: ISF deviation {isf_deviation:.1f}%")
+
+            if effective_isf.source == "default":
+                # Fall back to user settings if no learned data
+                user = await user_repo.get_by_id(user_id)
+                if user and user.settings and user.settings.insulinSensitivity != 50.0:
+                    isf = user.settings.insulinSensitivity
+                    logger.info(f"Using user settings ISF: {isf:.1f}")
+                else:
+                    logger.debug(f"Using default ISF: {isf:.1f}")
+            else:
+                logger.info(f"Using effective ISF: {isf:.1f} (baseline: {effective_isf.baseline:.1f}, deviation: {isf_deviation:.1f}%, source: {effective_isf.source})")
+        except Exception as e:
+            logger.warning(f"Failed to get effective ISF, using model prediction: {e}")
+
+        # Get effective PIR (Protein-to-Insulin Ratio) with timing info
+        pir = 25.0  # Default PIR
+        try:
+            effective_pir = await metabolic_params_service.get_effective_pir(user_id)
+            pir = effective_pir.value
+            logger.debug(f"Using effective PIR: {pir:.0f} (source: {effective_pir.source})")
+        except Exception as e:
+            logger.warning(f"Failed to get effective PIR, using default: {e}")
+
+        # Calculate metrics with predicted ISF and PIR
         metrics = iob_cob_service.get_current_metrics(
             current_bg=latest.value,
             treatments=treatments,
-            isf=isf
+            isf=isf,
+            pir=pir
         )
 
         # Build predictions response
@@ -123,10 +328,164 @@ async def get_current_glucose(user_id: str = Query(default=TEMP_USER_ID)):
             totalComparisons=accuracy_stats.linear_count + accuracy_stats.lstm_count
         )
 
+        # Calculate IOB/COB effect curve for visualization
+        user = await user_repo.get_by_id(user_id)
+        user_icr = user.settings.carbRatio if user else 10.0
+
+        # Calculate effect curve for IOB/COB decay visualization
+        # Use 180 min (3hr) which is clinically relevant for decision making
+        # Beyond 3 hours, IOB/COB effects are minimal and predictions become unreliable
+        current_bg_value = latest.value if latest else 120
+        base_time = latest.timestamp.replace(tzinfo=None) if latest else datetime.utcnow()
+        effect_curve_raw = iob_cob_service.calculate_bg_effect_curve(
+            current_iob=iob,
+            current_cob=cob,
+            current_pob=pob,  # Pass current POB for protein effect on expected BG
+            isf=isf,
+            icr=user_icr,
+            duration_min=180,  # 3 hours - clinically relevant prediction window
+            step_min=5,
+            current_bg=float(current_bg_value),  # Pass current BG for expected trajectory
+            treatments=treatments,  # Enable treatment-based formula for continuity
+            base_time=base_time  # Use latest reading timestamp as base
+        )
+
+        # Convert to EffectPoint schema
+        effect_curve = [
+            EffectPoint(**point) for point in effect_curve_raw
+        ]
+
+        # TFT predictions from prediction service
+        tft_predictions: List[TFTPrediction] = []
+
+        # Get TFT predictions from prediction result
+        if prediction_result.tft:
+            now = datetime.now(timezone.utc)  # Use timezone-aware UTC
+            for tft_pred in prediction_result.tft:
+                tft_predictions.append(TFTPrediction(
+                    timestamp=now + timedelta(minutes=tft_pred.horizon_min),
+                    horizon=tft_pred.horizon_min,
+                    value=tft_pred.value,
+                    lower=tft_pred.lower,
+                    upper=tft_pred.upper,
+                    tftDelta=tft_pred.tft_delta  # TFT modifier delta (physics + delta = final)
+                ))
+
+        # Calculate historical IOB/COB/POB and BG pressure at each glucose reading timestamp
+        # This provides continuous curves for plotting:
+        # - IOB/COB/POB decay over time
+        # - BG Pressure: where BG is heading based on REMAINING IOB (down) + COB (up) + POB (up, delayed)
+        historical_iob_cob: List[HistoricalIobCobPoint] = []
+
+        # Use user's ICR for carb-to-BG conversion (user already fetched above)
+        bg_per_gram_carb = isf / user_icr  # BG rise per gram of carbs
+        # Protein has about 50% the effect of carbs on BG (2.0 vs 4.0 bg_factor)
+        bg_per_gram_protein = iob_cob_service.protein_bg_factor  # BG rise per gram of protein
+
+        # Log protein in treatments for debugging
+        protein_treatments = [t for t in treatments if getattr(t, 'protein', None) and t.protein > 0]
+        if protein_treatments:
+            logger.info(f"[POB Debug] Found {len(protein_treatments)} treatments with protein")
+            for pt in protein_treatments[:3]:  # Log first 3
+                logger.info(f"[POB Debug] Treatment: {pt.timestamp}, protein={pt.protein}g, type={pt.type}")
+        else:
+            logger.debug("[POB Debug] No treatments with protein > 0 found")
+
+        for reading in glucose_history:
+            reading_time = reading.timestamp.replace(tzinfo=None)
+            hist_iob = iob_cob_service.calculate_iob(treatments, at_time=reading_time)
+            hist_cob = iob_cob_service.calculate_cob(treatments, at_time=reading_time)
+            hist_pob = iob_cob_service.calculate_pob(treatments, at_time=reading_time)
+
+            # Calculate INSTANTANEOUS PRESSURE using ACTIVITY RATES
+            # Key insight: Pressure should be a LEADING indicator
+            # - High insulin ACTIVITY (absorbing now) → pressure drops BEFORE BG falls
+            # - High carb ACTIVITY (absorbing now) → pressure rises BEFORE BG rises
+            #
+            # Use activity curves (0-1) at each moment, not total remaining amounts
+
+            # Calculate instantaneous activity for each treatment
+            total_insulin_activity_effect = 0.0
+            total_carb_activity_effect = 0.0
+            total_protein_activity_effect = 0.0
+
+            for treatment in treatments:
+                t_time = treatment.timestamp.replace(tzinfo=None)
+                time_since_dose = (reading_time - t_time).total_seconds() / 60.0
+
+                if time_since_dose < 0:
+                    continue  # Future treatment
+
+                # Insulin activity
+                if treatment.insulin and treatment.insulin > 0 and time_since_dose < iob_cob_service.insulin_duration_min:
+                    from services.iob_cob_service import insulin_activity_curve
+                    activity = insulin_activity_curve(time_since_dose, peak_min=insulin_peak_min, dia_min=iob_cob_service.insulin_duration_min)
+                    # Activity * amount * ISF = instantaneous BG lowering force
+                    total_insulin_activity_effect += activity * treatment.insulin * isf
+
+                # Carb activity
+                if treatment.carbs and treatment.carbs > 0:
+                    from services.iob_cob_service import carb_activity_curve, gi_to_absorption_params
+                    gi = getattr(treatment, 'glycemicIndex', None) or 55
+                    is_liquid = getattr(treatment, 'isLiquid', False) or False
+                    # Get carb duration from GI
+                    gi_params = gi_to_absorption_params(gi, is_liquid)
+                    duration = gi_params['duration_min']
+
+                    if time_since_dose < duration:
+                        activity = carb_activity_curve(time_since_dose, peak_min=carb_peak_min, duration_min=duration,
+                                                      glycemic_index=gi, is_liquid=is_liquid)
+                        total_carb_activity_effect += activity * treatment.carbs * bg_per_gram_carb
+
+                # Protein activity (delayed, like slow carbs)
+                if treatment.protein and treatment.protein > 0 and time_since_dose < 300:  # 5 hour duration
+                    from services.iob_cob_service import carb_activity_curve
+                    # Protein peaks much later (2-5 hours) - use learned peak if available
+                    activity = carb_activity_curve(time_since_dose, peak_min=protein_peak_min, duration_min=300,
+                                                  glycemic_index=30, is_liquid=False)  # GI=30 for slow absorption
+                    total_protein_activity_effect += activity * treatment.protein * bg_per_gram_protein
+
+            # Pressure offset based on NET ACTIVITY
+            # Positive = carbs absorbing faster → pressure above BG
+            # Negative = insulin absorbing faster → pressure below BG
+            activity_scale = 0.3  # Scale for visual clarity
+            pressure_offset = (total_carb_activity_effect + total_protein_activity_effect - total_insulin_activity_effect) * activity_scale
+
+            # Debug logging for first few readings
+            if len(historical_iob_cob) < 3:
+                logger.info(f"[BG Pressure Debug] Time: {reading.timestamp}, BG: {reading.value}")
+                logger.info(f"  Insulin activity effect: {total_insulin_activity_effect:.1f} mg/dL")
+                logger.info(f"  Carb activity effect: {total_carb_activity_effect:.1f} mg/dL")
+                logger.info(f"  Protein activity effect: {total_protein_activity_effect:.1f} mg/dL")
+                logger.info(f"  Net offset (scaled): {pressure_offset:.1f} mg/dL")
+                logger.info(f"  Final pressure: {reading.value + pressure_offset:.1f} mg/dL")
+                logger.info(f"  (IOB={hist_iob:.2f}, COB={hist_cob:.1f}, POB={hist_pob:.1f})")
+
+            # BG Pressure = current BG + offset (leading indicator)
+            bg_pressure = reading.value + pressure_offset
+
+            historical_iob_cob.append(HistoricalIobCobPoint(
+                timestamp=reading.timestamp,
+                iob=hist_iob,
+                cob=hist_cob,
+                pob=hist_pob,
+                bgPressure=round(bg_pressure, 0),  # Instantaneous pressure at this moment
+                actualBg=reading.value
+            ))
+
+        # Log POB summary for debugging
+        pob_values = [p.pob for p in historical_iob_cob]
+        max_pob = max(pob_values) if pob_values else 0
+        non_zero_pob = sum(1 for p in pob_values if p > 0)
+        logger.info(f"[POB Debug] Historical POB summary: max={max_pob:.1f}g, non_zero_count={non_zero_pob}, total_points={len(pob_values)}")
+
         return GlucoseCurrentResponse(
             glucose=glucose_with_predictions,
             metrics=metrics,
-            accuracy=accuracy
+            accuracy=accuracy,
+            tftPredictions=tft_predictions,
+            effectCurve=effect_curve,
+            historicalIobCob=historical_iob_cob
         )
 
     except HTTPException:
@@ -138,16 +497,22 @@ async def get_current_glucose(user_id: str = Query(default=TEMP_USER_ID)):
 
 @router.get("/history", response_model=GlucoseHistoryResponse)
 async def get_glucose_history(
-    user_id: str = Query(default=TEMP_USER_ID),
+    user_id: str = Query(..., description="User ID whose data to view"),
     hours: int = Query(default=24, ge=1, le=168, description="Hours of history (1-168)"),
-    limit: int = Query(default=1000, ge=1, le=5000)
+    limit: int = Query(default=1000, ge=1, le=5000),
+    current_user = Depends(get_current_user)
 ):
     """
     Get historical glucose readings.
 
     Returns glucose readings for the specified time period.
+    Requires JWT authentication. Users can view their own data or their children's data.
     """
     try:
+        # SECURITY: Always validate access using authenticated user
+        has_access = await validate_user_access(current_user.id, user_id)
+        if not has_access:
+            raise HTTPException(status_code=403, detail="Not authorized to view this user's data")
         start_time = datetime.utcnow() - timedelta(hours=hours)
         end_time = datetime.utcnow()
 
@@ -172,8 +537,9 @@ async def get_glucose_history(
 
 @router.get("/range-stats")
 async def get_range_stats(
-    user_id: str = Query(default=TEMP_USER_ID),
-    hours: int = Query(default=24, ge=1, le=168)
+    user_id: str = Query(..., description="User ID whose data to view"),
+    hours: int = Query(default=24, ge=1, le=168),
+    current_user = Depends(get_current_user)
 ):
     """
     Get time-in-range statistics.
@@ -184,8 +550,14 @@ async def get_range_stats(
     - In Range (70-180)
     - High (180-250)
     - Critical High (>250)
+
+    Requires JWT authentication. Users can view their own data or their children's data.
     """
     try:
+        # SECURITY: Always validate access using authenticated user
+        has_access = await validate_user_access(current_user.id, user_id)
+        if not has_access:
+            raise HTTPException(status_code=403, detail="Not authorized to view this user's data")
         start_time = datetime.utcnow() - timedelta(hours=hours)
         readings = await glucose_repo.get_history(user_id, start_time)
 

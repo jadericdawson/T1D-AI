@@ -1,10 +1,9 @@
 /**
  * Treatment Logging Modal
- * Modal for logging insulin and carb treatments
+ * Modal for logging insulin and carb treatments with custom timestamps
  */
-import { useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import { Pill, Syringe, X, Loader2, Check, AlertCircle } from 'lucide-react'
+import { useState, useMemo } from 'react'
+import { Pill, Syringe, Loader2, Check, AlertCircle, Clock } from 'lucide-react'
 import {
   Dialog,
   DialogContent,
@@ -40,6 +39,7 @@ const config: Record<TreatmentType, {
   min: number
   max: number
   step: number
+  notesHint?: string
 }> = {
   carbs: {
     title: 'Log Carbs',
@@ -51,6 +51,7 @@ const config: Record<TreatmentType, {
     min: 1,
     max: 200,
     step: 1,
+    notesHint: 'Describe your food for AI glycemic prediction (e.g., "pizza", "apple juice", "oatmeal")',
   },
   insulin: {
     title: 'Log Insulin',
@@ -62,6 +63,7 @@ const config: Record<TreatmentType, {
     min: 0.1,
     max: 50,
     step: 0.1,
+    notesHint: 'Optional notes (e.g., "Correction for high BG")',
   },
 }
 
@@ -69,6 +71,32 @@ const config: Record<TreatmentType, {
 const quickAmounts: Record<TreatmentType, number[]> = {
   carbs: [15, 30, 45, 60],
   insulin: [1, 2, 3, 5],
+}
+
+// Quick time offsets (in minutes, negative = past, positive = future)
+const quickTimeOffsets = [
+  { label: '-30m', offset: -30 },
+  { label: '-15m', offset: -15 },
+  { label: 'Now', offset: 0 },
+  { label: '+15m', offset: 15 },
+  { label: '+30m', offset: 30 },
+]
+
+// Format date for datetime-local input (YYYY-MM-DDTHH:mm)
+const formatDateTimeLocal = (date: Date): string => {
+  const pad = (n: number) => n.toString().padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+// Format time for display
+const formatTimeDisplay = (date: Date): string => {
+  const now = new Date()
+  const diffMs = date.getTime() - now.getTime()
+  const diffMins = Math.round(diffMs / 60000)
+
+  if (Math.abs(diffMins) < 2) return 'Now'
+  if (diffMins < 0) return `${Math.abs(diffMins)} min ago`
+  return `In ${diffMins} min`
 }
 
 export function TreatmentModal({
@@ -80,10 +108,15 @@ export function TreatmentModal({
 }: TreatmentModalProps) {
   const [value, setValue] = useState('')
   const [notes, setNotes] = useState('')
+  const [timestamp, setTimestamp] = useState<Date>(new Date())
   const [showSuccess, setShowSuccess] = useState(false)
 
-  const { mutate: logTreatment, isPending, isError, error } = useLogTreatment()
+  const { mutate: logTreatment, isPending, isError } = useLogTreatment()
   const cfg = config[type]
+
+  // Formatted timestamp for display
+  const timeDisplay = useMemo(() => formatTimeDisplay(timestamp), [timestamp])
+  const dateTimeLocalValue = useMemo(() => formatDateTimeLocal(timestamp), [timestamp])
 
   const handleSubmit = () => {
     const numValue = parseFloat(value)
@@ -92,8 +125,8 @@ export function TreatmentModal({
     }
 
     const treatment = type === 'carbs'
-      ? { type: 'carbs' as const, carbs: numValue, notes: notes || undefined }
-      : { type: 'insulin' as const, insulin: numValue, notes: notes || undefined }
+      ? { type: 'carbs' as const, carbs: numValue, notes: notes || undefined, timestamp: timestamp.toISOString() }
+      : { type: 'insulin' as const, insulin: numValue, notes: notes || undefined, timestamp: timestamp.toISOString() }
 
     logTreatment(treatment, {
       onSuccess: () => {
@@ -103,9 +136,23 @@ export function TreatmentModal({
           onOpenChange(false)
           setValue('')
           setNotes('')
+          setTimestamp(new Date())
         }, 1500)
       },
     })
+  }
+
+  const handleTimeOffset = (offsetMinutes: number) => {
+    const newDate = new Date()
+    newDate.setMinutes(newDate.getMinutes() + offsetMinutes)
+    setTimestamp(newDate)
+  }
+
+  const handleDateTimeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newDate = new Date(e.target.value)
+    if (!isNaN(newDate.getTime())) {
+      setTimestamp(newDate)
+    }
   }
 
   const handleQuickAmount = (amount: number) => {
@@ -126,34 +173,17 @@ export function TreatmentModal({
   return (
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="glass-card border-gray-700 sm:max-w-md">
-        <AnimatePresence mode="wait">
-          {showSuccess ? (
-            <motion.div
-              key="success"
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.9 }}
-              className="flex flex-col items-center justify-center py-12"
-            >
-              <motion.div
-                initial={{ scale: 0 }}
-                animate={{ scale: 1 }}
-                transition={{ type: 'spring', stiffness: 200, damping: 15 }}
-                className="w-16 h-16 rounded-full bg-green-500/20 flex items-center justify-center mb-4"
-              >
-                <Check className="w-8 h-8 text-green-500" />
-              </motion.div>
-              <p className="text-lg font-medium text-white">
-                {type === 'carbs' ? 'Carbs logged!' : 'Insulin logged!'}
-              </p>
-            </motion.div>
-          ) : (
-            <motion.div
-              key="form"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-            >
+        {showSuccess ? (
+          <div className="flex flex-col items-center justify-center py-12">
+            <div className="w-16 h-16 rounded-full bg-green-500/20 flex items-center justify-center mb-4">
+              <Check className="w-8 h-8 text-green-500" />
+            </div>
+            <p className="text-lg font-medium text-white">
+              {type === 'carbs' ? 'Carbs logged!' : 'Insulin logged!'}
+            </p>
+          </div>
+        ) : (
+          <div>
               <DialogHeader>
                 <div className="flex items-center gap-3">
                   <div className={cn('p-2 rounded-lg bg-slate-800', cfg.color)}>
@@ -215,13 +245,40 @@ export function TreatmentModal({
                   </div>
                 </div>
 
+                {/* Time Selection */}
+                <div className="space-y-2">
+                  <Label className="text-gray-400 text-sm flex items-center gap-2">
+                    <Clock className="w-4 h-4" />
+                    Time ({timeDisplay})
+                  </Label>
+                  <div className="flex gap-2 flex-wrap">
+                    {quickTimeOffsets.map((item) => (
+                      <Button
+                        key={item.offset}
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleTimeOffset(item.offset)}
+                        className={cn(
+                          'border-gray-700 bg-slate-800/50 hover:bg-slate-700',
+                          Math.abs(timestamp.getTime() - (Date.now() + item.offset * 60000)) < 60000 && 'border-cyan bg-cyan/10'
+                        )}
+                      >
+                        {item.label}
+                      </Button>
+                    ))}
+                  </div>
+                  <Input
+                    type="datetime-local"
+                    value={dateTimeLocalValue}
+                    onChange={handleDateTimeChange}
+                    className="bg-slate-800 border-gray-700 text-white"
+                  />
+                </div>
+
                 {/* Recommended dose hint for insulin */}
                 {type === 'insulin' && recommendedDose !== undefined && recommendedDose > 0 && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="p-3 rounded-lg bg-cyan/10 border border-cyan/30"
-                  >
+                  <div className="p-3 rounded-lg bg-cyan/10 border border-cyan/30">
                     <p className="text-sm text-cyan">
                       Recommended dose: <span className="font-bold">{recommendedDose.toFixed(2)}U</span>
                       {currentBg && <span className="text-gray-400"> (current BG: {currentBg})</span>}
@@ -235,36 +292,37 @@ export function TreatmentModal({
                     >
                       Use recommended dose
                     </Button>
-                  </motion.div>
+                  </div>
                 )}
 
                 {/* Notes */}
                 <div className="space-y-2">
                   <Label htmlFor="notes" className="text-gray-400">
-                    Notes (optional)
+                    {type === 'carbs' ? 'Food description' : 'Notes'} (optional)
                   </Label>
                   <Textarea
                     id="notes"
                     value={notes}
                     onChange={(e) => setNotes(e.target.value)}
-                    placeholder={type === 'carbs' ? 'e.g., Lunch - pasta' : 'e.g., Correction for high BG'}
+                    placeholder={cfg.notesHint || 'Optional notes'}
                     className="bg-slate-800 border-gray-700 text-white resize-none"
                     rows={2}
                   />
+                  {type === 'carbs' && (
+                    <p className="text-xs text-cyan/70">
+                      AI analyzes your food to predict glycemic impact and improve BG predictions
+                    </p>
+                  )}
                 </div>
 
                 {/* Error */}
                 {isError && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 flex items-center gap-2"
-                  >
+                  <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 flex items-center gap-2">
                     <AlertCircle className="w-4 h-4 text-red-500" />
                     <p className="text-sm text-red-400">
                       Failed to log treatment. Please try again.
                     </p>
-                  </motion.div>
+                  </div>
                 )}
               </div>
 
@@ -294,9 +352,8 @@ export function TreatmentModal({
                   )}
                 </Button>
               </DialogFooter>
-            </motion.div>
+            </div>
           )}
-        </AnimatePresence>
       </DialogContent>
     </Dialog>
   )

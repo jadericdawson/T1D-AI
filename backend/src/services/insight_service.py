@@ -215,7 +215,7 @@ class InsightService:
                     "avgRise": round(em_avg - ln_avg, 0),
                     "frequency": "Daily pattern",
                     "confidence": 0.8,
-                    "recommendation": "Discuss with your healthcare provider about adjusting nighttime basal insulin"
+                    "recommendation": "Consider adjusting nighttime basal insulin timing or dose"
                 })
 
         # Nocturnal hypoglycemia (12-4 AM lows)
@@ -547,6 +547,155 @@ class InsightService:
             "stats": weekly_stats,
             "comparison": comparison,
             "summary": summary,
+            "generatedAt": datetime.utcnow().isoformat()
+        }
+
+
+    async def get_realtime_insight(
+        self,
+        user_id: str,
+        current_bg: float,
+        trend: str,
+        iob: float,
+        cob: float,
+        predictions: Dict[str, Any],
+        recent_food: Optional[str] = None,
+        recent_insulin: Optional[float] = None,
+        # All diabetes metrics for comprehensive AI advice
+        isf: Optional[float] = None,
+        icr: Optional[float] = None,
+        pir: Optional[float] = None,
+        dose: Optional[float] = None,
+        bg_pressure: Optional[float] = None,
+        tft_predictions: Optional[list] = None,
+        recent_gi: Optional[float] = None,
+        absorption_rate: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate real-time AI insight based on current state.
+
+        Provides immediate actionable advice based on:
+        - Current BG and trend
+        - Active IOB/COB
+        - All diabetes metrics: ISF, ICR, PIR, recommended dose
+        - TFT predictions with confidence intervals
+        - BG Pressure (where BG is heading based on IOB/COB)
+        - Recent food (including GI and absorption rate)
+        - Recent insulin
+
+        Args:
+            user_id: User identifier
+            current_bg: Current blood glucose
+            trend: Current trend direction (Flat, FortyFiveUp, etc.)
+            iob: Insulin on board
+            cob: Carbs on board
+            predictions: Dict with linear, lstm predictions (deprecated)
+            recent_food: Description of recently eaten food
+            recent_insulin: Amount of recent insulin dose
+            isf: Insulin Sensitivity Factor
+            icr: Insulin to Carb Ratio
+            pir: Protein to Insulin Ratio
+            dose: Currently recommended correction dose
+            bg_pressure: BG Pressure - net effect of IOB/COB
+            tft_predictions: TFT predictions with confidence intervals
+            recent_gi: Glycemic Index of recent food
+            absorption_rate: Absorption rate of recent food
+
+        Returns:
+            Real-time insight with advice
+        """
+        try:
+            # Build context for GPT with all available data
+            context = {
+                "currentBg": current_bg,
+                "trend": trend,
+                "iob": iob,
+                "cob": cob,
+                "recentFood": recent_food,
+                "recentInsulin": recent_insulin,
+                # All diabetes metrics for comprehensive AI advice
+                "isf": isf if isf else 50,  # Default ISF if not provided
+                "icr": icr if icr else 10,  # Default ICR if not provided
+                "pir": pir if pir else 14,  # Default PIR if not provided
+                "dose": dose if dose else 0,  # Recommended correction dose
+                "bgPressure": bg_pressure if bg_pressure else 0,
+                "tftPredictions": tft_predictions or [],
+                "recentGI": recent_gi,
+                "absorptionRate": absorption_rate
+            }
+
+            # Use GPT to generate real-time advice
+            insight = await openai_service.generate_realtime_insight(context)
+
+            return {
+                "insight": insight.get("message", ""),
+                "urgency": insight.get("urgency", "normal"),  # low, normal, high, critical
+                "action": insight.get("action"),  # Suggested action if any
+                "reasoning": insight.get("reasoning", ""),
+                "generatedAt": datetime.utcnow().isoformat()
+            }
+
+        except Exception as e:
+            logger.error(f"Error generating real-time insight: {e}")
+            # Fallback to rule-based insight
+            return self._generate_fallback_insight(current_bg, trend, iob, cob, predictions)
+
+    def _generate_fallback_insight(
+        self,
+        current_bg: float,
+        trend: str,
+        iob: float,
+        cob: float,
+        predictions: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Generate rule-based insight when GPT is unavailable."""
+        message = ""
+        urgency = "normal"
+        action = None
+
+        # Critical situations
+        if current_bg < 70:
+            message = f"Blood glucose is low ({current_bg} mg/dL). Consider fast-acting carbs."
+            urgency = "high"
+            action = "Eat 15-20g fast carbs"
+        elif current_bg < 54:
+            message = f"Blood glucose is critically low ({current_bg} mg/dL)! Treat immediately."
+            urgency = "critical"
+            action = "Treat with glucose tabs NOW"
+        elif current_bg > 250:
+            message = f"Blood glucose is high ({current_bg} mg/dL). Active IOB: {iob:.1f}U."
+            urgency = "high" if iob < 1 else "normal"
+            if iob < 1:
+                action = "Consider correction dose"
+
+        # Prediction-based insights
+        elif predictions:
+            pred_15 = predictions.get("lstm", predictions.get("linear", [None]))[2] if len(predictions.get("lstm", predictions.get("linear", []))) > 2 else None
+            if pred_15:
+                if pred_15 < 70:
+                    message = f"Prediction shows BG dropping to {pred_15:.0f} mg/dL in 15 min."
+                    urgency = "high"
+                    action = "Have carbs ready"
+                elif pred_15 > 200 and iob < 1:
+                    message = f"BG rising toward {pred_15:.0f} mg/dL. IOB: {iob:.1f}U."
+                    urgency = "normal"
+
+        # Default message
+        if not message:
+            if iob > 0.5 and cob > 10:
+                message = f"IOB ({iob:.1f}U) and COB ({cob:.0f}g) active. Monitoring."
+            elif iob > 2:
+                message = f"Significant IOB ({iob:.1f}U) still active. Watch for lows."
+            elif cob > 20:
+                message = f"Carbs still absorbing ({cob:.0f}g COB). BG may rise."
+            else:
+                message = f"Current BG: {current_bg} mg/dL. Stable."
+
+        return {
+            "insight": message,
+            "urgency": urgency,
+            "action": action,
+            "reasoning": "Rule-based analysis",
             "generatedAt": datetime.utcnow().isoformat()
         }
 

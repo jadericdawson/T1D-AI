@@ -146,6 +146,12 @@
   box-shadow: 0 10px 30px var(--glow-color);
 }
 
+/* Disable hover lift for dialogs/modals - they should stay fixed */
+[role="dialog"].glass-card:hover,
+.glass-card[data-state="open"]:hover {
+  transform: none;
+}
+
 .glass-panel {
   background: var(--glass-bg);
   backdrop-filter: blur(10px);

@@ -6,12 +6,13 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Literal
 
-from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Depends
 from pydantic import BaseModel, Field
 
 from database.repositories import GlucoseRepository, TreatmentRepository, InsightRepository
 from services.insight_service import insight_service
-from models.schemas import AIInsight
+from models.schemas import AIInsight, User
+from auth import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/insights", tags=["insights"])
@@ -20,8 +21,6 @@ router = APIRouter(prefix="/insights", tags=["insights"])
 glucose_repo = GlucoseRepository()
 treatment_repo = TreatmentRepository()
 insight_repo = InsightRepository()
-
-TEMP_USER_ID = "demo_user"
 
 
 # Response Models
@@ -96,10 +95,10 @@ class GenerateInsightsResponse(BaseModel):
 # Endpoints
 @router.get("/", response_model=InsightsListResponse)
 async def get_insights(
-    user_id: str = Query(default=TEMP_USER_ID),
     category: Optional[str] = Query(None, description="Filter by category"),
     limit: int = Query(default=10, ge=1, le=50),
-    offset: int = Query(default=0, ge=0)
+    offset: int = Query(default=0, ge=0),
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get AI-generated insights for the user.
@@ -110,6 +109,7 @@ async def get_insights(
     - warning: Alerts about concerning trends
     - achievement: Positive feedback
     """
+    user_id = current_user.id
     try:
         insights = await insight_repo.get_by_user(
             user_id=user_id,
@@ -143,8 +143,8 @@ async def get_insights(
 
 @router.get("/patterns")
 async def get_patterns(
-    user_id: str = Query(default=TEMP_USER_ID),
-    days: int = Query(default=14, ge=7, le=90)
+    days: int = Query(default=14, ge=7, le=90),
+    current_user: User = Depends(get_current_user)
 ):
     """
     Detect glucose patterns over the specified period.
@@ -156,6 +156,7 @@ async def get_patterns(
     - Nocturnal hypoglycemia
     - Glucose variability
     """
+    user_id = current_user.id
     try:
         result = await insight_service.detect_patterns(user_id, days)
         return result
@@ -167,8 +168,8 @@ async def get_patterns(
 
 @router.get("/meal-impact", response_model=MealImpactResponse)
 async def get_meal_impact(
-    user_id: str = Query(default=TEMP_USER_ID),
-    days: int = Query(default=14, ge=7, le=90)
+    days: int = Query(default=14, ge=7, le=90),
+    current_user: User = Depends(get_current_user)
 ):
     """
     Analyze the impact of meals on blood glucose.
@@ -179,6 +180,7 @@ async def get_meal_impact(
     - Problematic meal types
     - Personalized recommendations
     """
+    user_id = current_user.id
     try:
         result = await insight_service.analyze_meal_impact(user_id, days)
 
@@ -200,8 +202,8 @@ async def get_meal_impact(
 
 @router.get("/anomalies")
 async def get_anomalies(
-    user_id: str = Query(default=TEMP_USER_ID),
-    hours: int = Query(default=24, ge=1, le=168)
+    hours: int = Query(default=24, ge=1, le=168),
+    current_user: User = Depends(get_current_user)
 ):
     """
     Detect anomalies in recent glucose data.
@@ -212,6 +214,7 @@ async def get_anomalies(
     - Compression lows
     - Unusual patterns
     """
+    user_id = current_user.id
     try:
         anomalies = await insight_service.detect_anomalies(user_id, hours)
 
@@ -239,9 +242,9 @@ async def get_anomalies(
 
 @router.post("/generate", response_model=GenerateInsightsResponse)
 async def generate_insights(
-    user_id: str = Query(default=TEMP_USER_ID),
     force: bool = Query(default=False, description="Force regeneration"),
-    background_tasks: BackgroundTasks = None
+    background_tasks: BackgroundTasks = None,
+    current_user: User = Depends(get_current_user)
 ):
     """
     Generate new AI insights for the user.
@@ -249,6 +252,7 @@ async def generate_insights(
     Uses GPT-4.1 to analyze glucose patterns and provide personalized recommendations.
     Insights are cached for 1 hour.
     """
+    user_id = current_user.id
     try:
         result = await insight_service.generate_insights(user_id, force)
         return GenerateInsightsResponse(**result)
@@ -260,7 +264,7 @@ async def generate_insights(
 
 @router.get("/weekly-summary", response_model=WeeklySummaryResponse)
 async def get_weekly_summary(
-    user_id: str = Query(default=TEMP_USER_ID)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get a weekly summary with GPT-powered analysis.
@@ -270,6 +274,7 @@ async def get_weekly_summary(
     - Week-over-week comparison
     - AI-generated summary and recommendations
     """
+    user_id = current_user.id
     try:
         result = await insight_service.get_weekly_summary(user_id)
 
@@ -287,11 +292,12 @@ async def get_weekly_summary(
 
 @router.delete("/expired")
 async def cleanup_expired_insights(
-    user_id: str = Query(default=TEMP_USER_ID)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Clean up expired insights for a user.
     """
+    user_id = current_user.id
     try:
         deleted_count = await insight_repo.delete_expired(user_id)
         return {
@@ -301,6 +307,165 @@ async def cleanup_expired_insights(
 
     except Exception as e:
         logger.error(f"Error cleaning up insights: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class RealtimeInsightRequest(BaseModel):
+    """Request for real-time AI insight."""
+    currentBg: float = Field(..., description="Current blood glucose")
+    trend: str = Field(default="Flat", description="Current trend")
+    iob: float = Field(default=0, description="Insulin on board")
+    cob: float = Field(default=0, description="Carbs on board")
+    recentFood: Optional[str] = Field(default=None, description="Recent food eaten")
+    recentInsulin: Optional[float] = Field(default=None, description="Recent insulin dose")
+    # All diabetes metrics for comprehensive AI advice
+    isf: Optional[float] = Field(default=None, description="Insulin Sensitivity Factor")
+    icr: Optional[float] = Field(default=None, description="Insulin to Carb Ratio")
+    pir: Optional[float] = Field(default=None, description="Protein to Insulin Ratio")
+    dose: Optional[float] = Field(default=None, description="Recommended correction dose")
+    bgPressure: Optional[float] = Field(default=None, description="BG Pressure - where BG is heading")
+    tftPredictions: Optional[list] = Field(default=None, description="TFT predictions with confidence")
+    recentGI: Optional[float] = Field(default=None, description="GI of recent food")
+    absorptionRate: Optional[str] = Field(default=None, description="Absorption rate of recent food")
+
+
+class RealtimeInsightResponse(BaseModel):
+    """Response with real-time AI insight."""
+    insight: str
+    urgency: str  # low, normal, high, critical
+    action: Optional[str] = None
+    reasoning: str
+    generatedAt: str
+
+
+@router.post("/realtime", response_model=RealtimeInsightResponse)
+async def get_realtime_insight(
+    request: RealtimeInsightRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get real-time AI insight based on current diabetes state.
+
+    Uses GPT to analyze:
+    - Current BG and trend
+    - Active IOB/COB
+    - ML predictions
+    - Recent food (fat, protein, carbs all affect BG differently)
+    - Recent insulin
+
+    Returns immediate, actionable advice.
+    """
+    user_id = current_user.id
+    try:
+        result = await insight_service.get_realtime_insight(
+            user_id=user_id,
+            current_bg=request.currentBg,
+            trend=request.trend,
+            iob=request.iob,
+            cob=request.cob,
+            predictions={},  # Deprecated - using TFT predictions
+            recent_food=request.recentFood,
+            recent_insulin=request.recentInsulin,
+            # All diabetes metrics for comprehensive AI advice
+            isf=request.isf,
+            icr=request.icr,
+            pir=request.pir,
+            dose=request.dose,
+            bg_pressure=request.bgPressure,
+            tft_predictions=request.tftPredictions,
+            recent_gi=request.recentGI,
+            absorption_rate=request.absorptionRate
+        )
+
+        return RealtimeInsightResponse(
+            insight=result.get("insight", ""),
+            urgency=result.get("urgency", "normal"),
+            action=result.get("action"),
+            reasoning=result.get("reasoning", ""),
+            generatedAt=result.get("generatedAt", datetime.utcnow().isoformat())
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting real-time insight: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ChatRequest(BaseModel):
+    """Request for AI chat/what-if questions."""
+    question: str = Field(..., description="User's question in natural language")
+    # All diabetes metrics for accurate calculations
+    currentBg: Optional[float] = Field(default=None, description="Current blood glucose")
+    trend: Optional[str] = Field(default=None, description="Current trend")
+    iob: Optional[float] = Field(default=None, description="Insulin on board")
+    cob: Optional[float] = Field(default=None, description="Carbs on board")
+    isf: Optional[float] = Field(default=None, description="Insulin Sensitivity Factor")
+    icr: Optional[float] = Field(default=None, description="Insulin to Carb Ratio")
+    pir: Optional[float] = Field(default=None, description="Protein to Insulin Ratio")
+    dose: Optional[float] = Field(default=None, description="Current recommended correction dose")
+    bgPressure: Optional[float] = Field(default=None, description="BG Pressure")
+    tftPredictions: Optional[list] = Field(default=None, description="TFT predictions")
+
+
+class ChatResponse(BaseModel):
+    """Response from AI chat."""
+    response: str
+    prediction: Optional[dict] = None
+    recommendation: Optional[dict] = None
+    calculation: Optional[str] = None
+    confidence: str
+    generatedAt: str
+
+
+@router.post("/chat", response_model=ChatResponse)
+async def chat_with_ai(
+    request: ChatRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Chat with AI for "what-if" scenario questions.
+
+    Allows users to ask questions like:
+    - "What will happen if I eat 37 carbs at 11:30am?"
+    - "How much insulin do I need for a 50g meal?"
+    - "Should I take a correction now or wait?"
+
+    The AI uses current diabetes state (BG, IOB, COB, ISF, etc.)
+    to provide specific, calculated answers.
+    """
+    try:
+        # Build context from request - AI gets access to all current data
+        context = {
+            "currentBg": request.currentBg or 120,
+            "trend": request.trend or "Flat",
+            "iob": request.iob or 0,
+            "cob": request.cob or 0,
+            "isf": request.isf or 50,
+            "icr": request.icr or 10,
+            "pir": request.pir or 14,
+            "dose": request.dose or 0,
+            "bgPressure": request.bgPressure or 0,
+            "tftPredictions": request.tftPredictions or [],
+            "currentTime": datetime.utcnow().strftime("%H:%M"),
+        }
+
+        # Call OpenAI service for chat response
+        from services.openai_service import openai_service
+        result = await openai_service.chat_what_if(
+            question=request.question,
+            context=context
+        )
+
+        return ChatResponse(
+            response=result.get("response", ""),
+            prediction=result.get("prediction"),
+            recommendation=result.get("recommendation"),
+            calculation=result.get("calculation"),
+            confidence=result.get("confidence", "medium"),
+            generatedAt=result.get("generatedAt", datetime.utcnow().isoformat())
+        )
+
+    except Exception as e:
+        logger.error(f"Error in AI chat: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

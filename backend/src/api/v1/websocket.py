@@ -15,6 +15,8 @@ from pydantic import BaseModel
 from database.repositories import GlucoseRepository, TreatmentRepository
 from services.iob_cob_service import IOBCOBService
 from services.prediction_service import get_prediction_service
+from services.dexcom_service import DexcomShareService
+from models.schemas import GlucoseReading, TrendDirection
 from config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -90,14 +92,73 @@ glucose_repo = GlucoseRepository()
 treatment_repo = TreatmentRepository()
 iob_cob_service = IOBCOBService.from_settings()
 
+# Dexcom service for direct CGM data (lazy init)
+_dexcom_service: DexcomShareService | None = None
+
+def get_dexcom_service() -> DexcomShareService | None:
+    """Get or create Dexcom service (lazy init)."""
+    global _dexcom_service
+    if _dexcom_service is None:
+        try:
+            _dexcom_service = DexcomShareService()
+            logger.info("WebSocket: Initialized Dexcom Share service")
+        except Exception as e:
+            logger.warning(f"WebSocket: Failed to initialize Dexcom service: {e}")
+    return _dexcom_service
+
+def dexcom_to_glucose_reading(dexcom_reading, user_id: str) -> GlucoseReading:
+    """Convert Dexcom reading to GlucoseReading schema."""
+    trend_map = {
+        "rising quickly": TrendDirection.DOUBLE_UP,
+        "rising": TrendDirection.SINGLE_UP,
+        "rising slightly": TrendDirection.FORTY_FIVE_UP,
+        "steady": TrendDirection.FLAT,
+        "falling slightly": TrendDirection.FORTY_FIVE_DOWN,
+        "falling": TrendDirection.SINGLE_DOWN,
+        "falling quickly": TrendDirection.DOUBLE_DOWN,
+    }
+    trend = trend_map.get(dexcom_reading.trend_description.lower(), TrendDirection.FLAT)
+
+    return GlucoseReading(
+        id=f"dexcom-{int(dexcom_reading.timestamp.timestamp() * 1000)}",
+        userId=user_id,
+        value=dexcom_reading.value,
+        timestamp=dexcom_reading.timestamp,
+        trend=trend,
+        source="dexcom"
+    )
+
 
 async def get_glucose_update(user_id: str) -> dict:
     """
     Get current glucose data with predictions for WebSocket broadcast.
+    Tries Dexcom first for freshest data, falls back to database.
     """
     try:
-        # Get latest glucose reading
-        latest = await glucose_repo.get_latest(user_id)
+        # Try Dexcom first for freshest data
+        latest: GlucoseReading | None = None
+        dexcom_svc = get_dexcom_service()
+
+        if dexcom_svc:
+            try:
+                dexcom_reading = await dexcom_svc.get_latest_reading_async()
+                if dexcom_reading:
+                    latest = dexcom_to_glucose_reading(dexcom_reading, user_id)
+                    logger.info(f"WebSocket: Got fresh reading from Dexcom: {latest.value} mg/dL")
+            except Exception as e:
+                logger.warning(f"WebSocket: Dexcom fetch failed: {e}")
+
+        # Fall back to database if Dexcom unavailable
+        db_latest = await glucose_repo.get_latest(user_id)
+
+        if db_latest:
+            if not latest:
+                latest = db_latest
+                logger.info(f"WebSocket: Using database data: {latest.value} mg/dL")
+            elif db_latest.timestamp > latest.timestamp:
+                latest = db_latest
+                logger.info(f"WebSocket: Database data is fresher, using: {latest.value} mg/dL")
+
         if not latest:
             return {"type": "error", "message": "No glucose data"}
 
@@ -136,6 +197,7 @@ async def get_glucose_update(user_id: str) -> dict:
             current_bg=float(latest.value),
             trend=trend_val,
             iob=iob,
+            cob=cob,
             glucose_history=[r.model_dump() for r in glucose_history],
             treatments=[t.model_dump() for t in treatments]
         )
@@ -148,6 +210,7 @@ async def get_glucose_update(user_id: str) -> dict:
                 "value": latest.value,
                 "trend": str(latest.trend) if latest.trend else "Flat",
                 "trendArrow": get_trend_arrow(trend_val),
+                "source": latest.source if hasattr(latest, 'source') and latest.source else "gluroo",
                 "predictions": {
                     "linear": prediction.linear,
                     "lstm": prediction.lstm,

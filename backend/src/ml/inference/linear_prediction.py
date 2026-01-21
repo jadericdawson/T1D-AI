@@ -22,14 +22,16 @@ class LinearPredictor:
 
     def __init__(
         self,
-        history_points: int = 6,  # 30 min of history at 5-min intervals
+        history_points: int = 3,  # 15 min of history at 5-min intervals (last 3 points)
         prediction_horizons: List[int] = None
     ):
         """
         Initialize linear predictor.
 
+        Uses linear fit with last 3 data points for prediction.
+
         Args:
-            history_points: Number of recent points to use for fitting
+            history_points: Number of recent points to use for fitting (default: 3)
             prediction_horizons: Minutes ahead to predict (default: [5, 10, 15])
         """
         self.history_points = history_points

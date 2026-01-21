@@ -1,7 +1,8 @@
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { Activity, Brain, TrendingUp, Shield, Zap, Heart } from 'lucide-react'
+import { Activity, Brain, TrendingUp, Shield, Zap, Heart, LogIn, UserPlus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { useAuthStore } from '@/stores/authStore'
 
 const fadeInUp = {
   hidden: { opacity: 0, y: 30 },
@@ -14,6 +15,13 @@ const staggerContainer = {
 }
 
 export default function Landing() {
+  const { user, isAuthenticated, loginWithMicrosoft, logout, isLoading } = useAuthStore()
+
+  // If already authenticated, show go to dashboard option
+  const handleMicrosoftLogin = () => {
+    loginWithMicrosoft()
+  }
+
   return (
     <div className="min-h-screen">
       {/* Hero Section */}
@@ -27,13 +35,13 @@ export default function Landing() {
           {/* Logo/Icon */}
           <motion.div variants={fadeInUp} className="mb-8">
             <div className="w-24 h-24 mx-auto rounded-full bg-gradient-to-r from-cyan to-blue-600 flex items-center justify-center animate-pulse-glow">
-              <Activity className="w-12 h-12 text-white" />
+              <img src="/favicon.svg" alt="" className="w-12 h-12" />
             </div>
           </motion.div>
 
           {/* Title */}
           <motion.h1 variants={fadeInUp} className="hero-title mb-6">
-            T1D-AI
+            <img src="/logo.svg" alt="T1D-AI" className="h-16 mx-auto" />
           </motion.h1>
 
           <motion.p variants={fadeInUp} className="hero-subtitle mx-auto mb-4">
@@ -46,19 +54,50 @@ export default function Landing() {
             calculate optimal doses, and give you back the mental freedom to live your life.
           </motion.p>
 
-          {/* CTA Buttons */}
+          {/* CTA Buttons - Always show login options */}
           <motion.div variants={fadeInUp} className="flex flex-col sm:flex-row gap-4 justify-center">
-            <Link to="/onboarding">
-              <Button className="btn-primary text-lg px-8 py-6">
-                Get Started Free
+            {/* Microsoft Login */}
+            <Button
+              onClick={handleMicrosoftLogin}
+              disabled={isLoading}
+              className="btn-primary text-lg px-8 py-6 flex items-center gap-3"
+            >
+              <svg className="w-6 h-6" viewBox="0 0 21 21" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="1" y="1" width="9" height="9" fill="#F25022"/>
+                <rect x="11" y="1" width="9" height="9" fill="#7FBA00"/>
+                <rect x="1" y="11" width="9" height="9" fill="#00A4EF"/>
+                <rect x="11" y="11" width="9" height="9" fill="#FFB900"/>
+              </svg>
+              {isLoading ? 'Connecting...' : 'Sign in with Microsoft'}
+            </Button>
+            <Link to="/login">
+              <Button variant="outline" className="btn-secondary text-lg px-8 py-6">
+                <LogIn className="w-5 h-5 mr-2" />
+                Sign In
               </Button>
             </Link>
-            <Link to="/dashboard">
+            <Link to="/register">
               <Button variant="outline" className="btn-secondary text-lg px-8 py-6">
-                View Demo
+                <UserPlus className="w-5 h-5 mr-2" />
+                Sign Up
               </Button>
             </Link>
           </motion.div>
+
+          {/* If already logged in, show quick link to dashboard */}
+          {isAuthenticated && user && (
+            <motion.div variants={fadeInUp} className="mt-6 flex flex-col items-center gap-2">
+              <p className="text-gray-400 text-sm">Already logged in as {user.displayName || user.email}</p>
+              <div className="flex gap-4">
+                <Link to="/dashboard" className="text-cyan hover:underline">
+                  Go to Dashboard
+                </Link>
+                <button onClick={logout} className="text-gray-400 hover:text-red-400 hover:underline">
+                  Logout
+                </button>
+              </div>
+            </motion.div>
+          )}
         </motion.div>
 
         {/* Scroll indicator */}
@@ -288,9 +327,8 @@ export default function Landing() {
       {/* Footer */}
       <footer className="py-8 px-6 border-t border-gray-800">
         <div className="max-w-6xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
-            <Activity className="w-6 h-6 text-cyan" />
-            <span className="font-bold text-white">T1D-AI</span>
+          <div className="flex items-center">
+            <img src="/logo.svg" alt="T1D-AI" className="h-8" />
           </div>
           <p className="text-gray-500 text-sm">
             Built with love for the T1D community. Not medical advice.

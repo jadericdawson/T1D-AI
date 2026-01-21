@@ -3,7 +3,14 @@ import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
+import ErrorBoundary from './components/ErrorBoundary'
+import { initializeAuth } from './stores/authStore'
 import './styles/globals.css'
+
+// Validate stored auth tokens BEFORE React renders
+// This clears expired tokens so Zustand doesn't rehydrate with stale auth state
+const isAuthValid = initializeAuth()
+console.log(`[Main] Auth initialization: ${isAuthValid ? 'valid token' : 'no valid token'}`)
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -16,10 +23,12 @@ const queryClient = new QueryClient({
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <App />
-      </BrowserRouter>
-    </QueryClientProvider>
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <App />
+        </BrowserRouter>
+      </QueryClientProvider>
+    </ErrorBoundary>
   </React.StrictMode>,
 )

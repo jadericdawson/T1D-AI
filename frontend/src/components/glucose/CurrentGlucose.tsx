@@ -10,6 +10,7 @@ interface CurrentGlucoseProps {
   value: number
   trend: string | null
   timestamp: string
+  source?: string
   className?: string
 }
 
@@ -22,11 +23,33 @@ export function CurrentGlucose({
   value,
   trend,
   timestamp,
+  source,
   className,
 }: CurrentGlucoseProps) {
   const glucoseColor = getGlucoseColor(value)
   const glucoseRange = getGlucoseRange(value)
   const trendArrow = getTrendArrow(trend || 'Flat')
+
+  // Source display name
+  const sourceLabel = source === 'dexcom' ? 'Dexcom' : source === 'gluroo' ? 'Gluroo' : source || 'Unknown'
+
+  // Calculate data freshness
+  const dataAgeMinutes = timestamp
+    ? (Date.now() - new Date(timestamp).getTime()) / 60000
+    : Infinity
+
+  // Freshness indicator: green < 6min, yellow 6-10min, red > 10min
+  const getFreshnessColor = () => {
+    if (dataAgeMinutes < 6) return 'bg-green-500'
+    if (dataAgeMinutes < 10) return 'bg-yellow-500'
+    return 'bg-red-500'
+  }
+
+  const getFreshnessLabel = () => {
+    if (dataAgeMinutes < 6) return 'Fresh'
+    if (dataAgeMinutes < 10) return 'Delayed'
+    return 'Stale'
+  }
 
   const rangeLabels: Record<string, string> = {
     'critical-low': 'CRITICAL LOW',
@@ -74,8 +97,30 @@ export function CurrentGlucose({
         </motion.span>
       </div>
 
-      <p className="text-gray-500 text-sm mt-2">
-        mg/dL &bull; {formatTime(timestamp)}
+      <p className="text-gray-500 text-sm mt-2 flex items-center justify-center gap-2">
+        <span>mg/dL &bull; {formatTime(timestamp)}</span>
+        {/* Freshness indicator */}
+        <span
+          className={cn(
+            'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs',
+            dataAgeMinutes < 6 ? 'bg-green-500/20 text-green-400' :
+            dataAgeMinutes < 10 ? 'bg-yellow-500/20 text-yellow-400' :
+            'bg-red-500/20 text-red-400'
+          )}
+          title={`Data is ${Math.round(dataAgeMinutes)} minutes old`}
+        >
+          <span className={cn('w-2 h-2 rounded-full', getFreshnessColor())} />
+          {getFreshnessLabel()}
+        </span>
+        {/* Source indicator */}
+        {source && (
+          <span className={cn(
+            'px-1.5 py-0.5 rounded text-xs',
+            source === 'dexcom' ? 'bg-cyan/20 text-cyan' : 'bg-blue-500/20 text-blue-400'
+          )}>
+            {sourceLabel}
+          </span>
+        )}
       </p>
 
       <Badge

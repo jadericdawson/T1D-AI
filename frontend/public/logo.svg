@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 64" fill="none">
+  <!-- Icon part -->
+  <g transform="translate(4, 2)">
+    <!-- Background circle -->
+    <circle cx="30" cy="30" r="28" fill="#0f172a" stroke="#00c6ff" stroke-width="2"/>
+
+    <!-- Glucose wave -->
+    <path
+      d="M10 36 Q16 26 22 30 Q28 34 34 24 Q40 14 46 22 Q50 28 50 26"
+      stroke="#00c6ff"
+      stroke-width="2.5"
+      stroke-linecap="round"
+      fill="none"
+    />
+
+    <!-- AI node dots -->
+    <circle cx="22" cy="30" r="2.5" fill="#00c6ff"/>
+    <circle cx="34" cy="24" r="2.5" fill="#00c6ff"/>
+    <circle cx="46" cy="22" r="2.5" fill="#00c6ff"/>
+
+    <!-- Connecting lines -->
+    <line x1="22" y1="30" x2="34" y2="24" stroke="#00c6ff" stroke-width="1" opacity="0.5"/>
+    <line x1="34" y1="24" x2="46" y2="22" stroke="#00c6ff" stroke-width="1" opacity="0.5"/>
+  </g>
+
+  <!-- T1D-AI text -->
+  <text x="75" y="42" font-family="Arial, sans-serif" font-size="28" font-weight="bold" fill="#00c6ff">T1D-AI</text>
+</svg>

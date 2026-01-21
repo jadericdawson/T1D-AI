@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Background circle -->
+  <circle cx="32" cy="32" r="30" fill="#0f172a" stroke="#00c6ff" stroke-width="2"/>
+
+  <!-- Glucose wave -->
+  <path
+    d="M12 38 Q18 28 24 32 Q30 36 36 26 Q42 16 48 24 Q52 30 52 28"
+    stroke="#00c6ff"
+    stroke-width="3"
+    stroke-linecap="round"
+    fill="none"
+  />
+
+  <!-- AI node dots -->
+  <circle cx="24" cy="32" r="3" fill="#00c6ff"/>
+  <circle cx="36" cy="26" r="3" fill="#00c6ff"/>
+  <circle cx="48" cy="24" r="3" fill="#00c6ff"/>
+
+  <!-- Connecting lines (neural network style) -->
+  <line x1="24" y1="32" x2="36" y2="26" stroke="#00c6ff" stroke-width="1" opacity="0.5"/>
+  <line x1="36" y1="26" x2="48" y2="24" stroke="#00c6ff" stroke-width="1" opacity="0.5"/>
+
+  <!-- T1D text -->
+  <text x="32" y="52" font-family="Arial, sans-serif" font-size="12" font-weight="bold" fill="#00c6ff" text-anchor="middle">T1D</text>
+</svg>

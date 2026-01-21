@@ -45,22 +45,40 @@ export function getTrendArrow(trend: string): string {
   return trendArrows[trend] || '?'
 }
 
-// Format time helpers
-export function formatTime(date: Date | string): string {
+// Default timezone for the platform (Eastern Time)
+export const DEFAULT_TIMEZONE = 'America/New_York'
+
+// Format time helpers - always use Eastern timezone
+export function formatTime(date: Date | string, timezone: string = DEFAULT_TIMEZONE): string {
   const d = typeof date === 'string' ? new Date(date) : date
   return d.toLocaleTimeString('en-US', {
     hour: 'numeric',
     minute: '2-digit',
-    hour12: true
+    hour12: true,
+    timeZone: timezone
   })
 }
 
-export function formatDate(date: Date | string): string {
+export function formatDate(date: Date | string, timezone: string = DEFAULT_TIMEZONE): string {
   const d = typeof date === 'string' ? new Date(date) : date
   return d.toLocaleDateString('en-US', {
     month: 'short',
     day: 'numeric',
-    year: 'numeric'
+    year: 'numeric',
+    timeZone: timezone
+  })
+}
+
+// Format datetime with both date and time
+export function formatDateTime(date: Date | string, timezone: string = DEFAULT_TIMEZONE): string {
+  const d = typeof date === 'string' ? new Date(date) : date
+  return d.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: timezone
   })
 }
 

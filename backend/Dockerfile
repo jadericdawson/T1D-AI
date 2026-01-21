@@ -20,8 +20,11 @@ COPY src/ ./src/
 # Copy static frontend files (built separately and copied before docker build)
 COPY static/ ./static/
 
-# Create models directory
-RUN mkdir -p /app/models
+# Copy ML models
+COPY models/ ./models/
+
+# Copy training scripts (for ACI training)
+COPY scripts/ ./scripts/
 
 # Set environment
 ENV PYTHONPATH=/app/src
@@ -35,4 +38,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Run the application with production settings
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# Note: PYTHONPATH=/app/src, so import "main" not "src.main"
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

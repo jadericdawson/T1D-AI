@@ -13,17 +13,28 @@ pydantic-settings==2.7.1
 azure-cosmos==4.9.0
 azure-storage-blob==12.24.0
 azure-identity==1.19.0
+azure-mgmt-containerinstance==10.1.0
+azure-communication-email==1.0.0
 openai==1.58.1
 
-# ML/AI
-torch==2.5.1
+# ML/AI - CPU only for inference (no CUDA needed)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
 numpy==2.2.1
 pandas==2.2.3
 scikit-learn==1.6.1
 
+# TFT (Temporal Fusion Transformer) and advanced ML
+pytorch-forecasting>=1.0.0
+pytorch-lightning>=2.0.0
+
+# MLflow for experiment tracking
+mlflow>=2.10.0
+
 # Authentication
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
 msal==1.31.1
 
 # HTTP client
@@ -33,6 +44,7 @@ aiohttp==3.11.11
 # Utilities
 python-dateutil==2.9.0
 pytz==2024.2
+python-dotenv==1.0.0
 
 # Testing
 pytest==8.3.4
@@ -42,3 +54,8 @@ httpx==0.28.1
 # Development
 black==24.10.0
 ruff==0.8.4
+email-validator>=2.0.0
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0
+msal>=1.24.0
+pydexcom>=0.4.0

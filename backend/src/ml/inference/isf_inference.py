@@ -49,7 +49,7 @@ class ISFInferenceService:
         self.feature_list_path = feature_list_path
 
         # Default ISF fallback (if model fails)
-        self.default_isf = 50.0  # 1U drops BG by 50 mg/dL
+        self.default_isf = 55.0  # 1U drops BG by 55 mg/dL
 
     def load(self) -> bool:
         """

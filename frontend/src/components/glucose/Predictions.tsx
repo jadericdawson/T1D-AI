@@ -1,16 +1,40 @@
 /**
  * Predictions Display Component
- * Shows linear and LSTM predictions with accuracy comparison
+ * Shows predicted BG values from the orange line (IOB/COB physics model)
  */
 import { motion } from 'framer-motion'
-import { TrendingUp, Cpu, LineChart, Trophy, Clock } from 'lucide-react'
-import { cn, getGlucoseColor, formatDecimal } from '@/lib/utils'
+import { TrendingUp, Clock } from 'lucide-react'
+import { cn, getGlucoseColor } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
-import { Progress } from '@/components/ui/progress'
+
+// Effect curve point with expectedBg (the orange line)
+interface EffectPoint {
+  minutesAhead: number
+  iobEffect: number
+  cobEffect: number
+  netEffect: number
+  remainingIOB?: number
+  remainingCOB?: number
+  expectedBg?: number
+  bgWithIobOnly?: number
+  bgWithCobOnly?: number
+}
+
+// TFT prediction with uncertainty bands
+interface TFTPrediction {
+  timestamp: string
+  horizon: number  // 30, 45, 60 minutes
+  value: number    // Median (50th percentile)
+  lower: number    // 10th percentile
+  upper: number    // 90th percentile
+  tftDelta?: number  // TFT modifier delta (mg/dL)
+}
 
 interface PredictionsProps {
-  linear: number[]
-  lstm: number[] | null
+  linear?: number[]
+  lstm?: number[] | null
+  tft?: TFTPrediction[]  // TFT predictions with uncertainty
+  effectCurve?: EffectPoint[]  // Orange line (expectedBg) values
   horizons?: number[] // [5, 10, 15] minutes
   accuracy?: {
     linearWins: number
@@ -18,6 +42,9 @@ interface PredictionsProps {
     totalComparisons: number
   }
   modelAvailable?: boolean
+  tftAvailable?: boolean  // Whether TFT model is loaded
+  dataReadings?: number   // Current number of glucose readings
+  dataRequired?: number   // Required readings for ML predictions (default 24)
   className?: string
 }
 
@@ -27,27 +54,13 @@ const fadeIn = {
 }
 
 export function PredictionsCard({
-  linear,
-  lstm,
-  horizons = [5, 10, 15],
-  accuracy,
-  modelAvailable = true,
+  effectCurve,
+  tft,
+  tftAvailable = false,
+  dataReadings,
+  dataRequired = 24,
   className,
 }: PredictionsProps) {
-  const winner = accuracy
-    ? accuracy.lstmWins > accuracy.linearWins
-      ? 'lstm'
-      : 'linear'
-    : null
-
-  const totalComparisons = accuracy?.totalComparisons || 0
-  const linearPct = totalComparisons > 0
-    ? (accuracy!.linearWins / totalComparisons) * 100
-    : 50
-  const lstmPct = totalComparisons > 0
-    ? (accuracy!.lstmWins / totalComparisons) * 100
-    : 50
-
   return (
     <motion.div
       initial="hidden"
@@ -56,123 +69,144 @@ export function PredictionsCard({
       className={cn('glass-card', className)}
     >
       <h3 className="text-lg font-semibold mb-4 text-white flex items-center gap-2">
-        <TrendingUp className="w-5 h-5 text-purple-500" />
-        Predictions
-        {!modelAvailable && (
-          <Badge variant="outline" className="ml-2 text-xs border-yellow-500/30 text-yellow-500">
-            Linear Only
-          </Badge>
-        )}
+        <TrendingUp className="w-5 h-5 text-orange-500" />
+        Predicted BG
       </h3>
 
       <div className="space-y-4">
-        {/* Linear Predictions */}
-        <PredictionRow
-          icon={<LineChart className="w-4 h-4" />}
-          label="Linear"
-          values={linear}
-          horizons={horizons}
-          color="text-gray-400"
-          isWinner={winner === 'linear'}
-        />
-
-        {/* LSTM Predictions */}
-        {lstm && lstm.length > 0 ? (
-          <PredictionRow
-            icon={<Cpu className="w-4 h-4" />}
-            label="LSTM"
-            values={lstm}
-            horizons={horizons}
-            color="text-purple-400"
-            isWinner={winner === 'lstm'}
-          />
+        {/* Predicted BG from effect curve (orange line values) */}
+        {effectCurve && effectCurve.length > 0 ? (
+          <PredictedBGRow effectCurve={effectCurve} tftPredictions={tft} />
+        ) : tft && tft.length > 0 ? (
+          // Fallback to TFT if no effect curve
+          <TFTPredictionRow predictions={tft} />
         ) : (
           <div className="flex items-center justify-between text-gray-500">
             <div className="flex items-center gap-2">
-              <Cpu className="w-4 h-4" />
-              <span>LSTM</span>
+              <TrendingUp className="w-4 h-4" />
+              <span>Predicted BG</span>
             </div>
-            <span className="text-sm italic">Model not available</span>
+            <span className="text-sm italic">
+              {tftAvailable ? 'Insufficient data' : 'Loading...'}
+            </span>
           </div>
         )}
 
-        {/* Accuracy Comparison */}
-        {accuracy && totalComparisons > 0 && (
-          <div className="pt-3 border-t border-gray-700/50">
-            <div className="flex items-center justify-between text-sm mb-2">
-              <span className="text-gray-500 flex items-center gap-1">
-                <Trophy className="w-4 h-4 text-yellow-500" />
-                Accuracy (wins)
-              </span>
-              <span className="text-gray-400">
-                Lin: {accuracy.linearWins} / LSTM: {accuracy.lstmWins}
-              </span>
-            </div>
-
-            {/* Visual progress bar */}
-            <div className="relative h-2 bg-gray-700 rounded-full overflow-hidden">
-              <div
-                className="absolute left-0 top-0 h-full bg-gray-500 transition-all"
-                style={{ width: `${linearPct}%` }}
-              />
-              <div
-                className="absolute right-0 top-0 h-full bg-purple-500 transition-all"
-                style={{ width: `${lstmPct}%` }}
-              />
-            </div>
-
-            <div className="flex justify-between text-xs text-gray-500 mt-1">
-              <span>Linear {linearPct.toFixed(0)}%</span>
-              <span>LSTM {lstmPct.toFixed(0)}%</span>
-            </div>
-          </div>
+        {/* Data Requirements Note */}
+        {dataReadings !== undefined && dataRequired !== undefined && dataReadings < dataRequired && (
+          <DataRequirementsNote current={dataReadings} required={dataRequired} />
         )}
       </div>
     </motion.div>
   )
 }
 
-// Individual prediction row
-function PredictionRow({
-  icon,
-  label,
-  values,
-  horizons,
-  color,
-  isWinner,
-}: {
-  icon: React.ReactNode
-  label: string
-  values: number[]
-  horizons: number[]
-  color: string
-  isWinner?: boolean
-}) {
-  return (
-    <div className="flex items-center justify-between">
-      <div className={cn('flex items-center gap-2', color)}>
-        {icon}
-        <span>{label}</span>
-        {isWinner && (
-          <Trophy className="w-3 h-3 text-yellow-500" />
-        )}
+// Predicted BG row showing orange line values at key horizons
+function PredictedBGRow({ effectCurve, tftPredictions }: { effectCurve: EffectPoint[], tftPredictions?: TFTPrediction[] }) {
+  // Find values at key horizons: 15, 30, 60, 120 min
+  const displayHorizons = [15, 30, 60, 120]
+
+  // Create a map of TFT deltas by horizon
+  const tftDeltaMap = new Map<number, number>()
+  if (tftPredictions) {
+    tftPredictions.forEach(p => {
+      if (p.tftDelta !== undefined && p.tftDelta !== null) {
+        tftDeltaMap.set(p.horizon, p.tftDelta)
+      }
+    })
+  }
+
+  // Guard against empty effectCurve
+  if (!effectCurve || effectCurve.length === 0) {
+    return (
+      <div className="flex items-center justify-between text-gray-500">
+        <span>Predicted BG</span>
+        <span className="text-sm italic">No predictions available</span>
       </div>
-      <div className="flex items-center gap-1">
-        {values.map((val, i) => (
-          <span key={i} className="flex items-center">
-            <span
-              className={cn(
-                'font-medium',
-                color,
-                label === 'LSTM' && 'font-semibold'
+    )
+  }
+
+  const predictions = displayHorizons.map(horizon => {
+    // Find the closest effect point to this horizon
+    const point = effectCurve.find(p => p.minutesAhead === horizon) ||
+      (effectCurve.length > 0
+        ? effectCurve.reduce((prev, curr) =>
+            Math.abs(curr.minutesAhead - horizon) < Math.abs(prev.minutesAhead - horizon) ? curr : prev
+          )
+        : null)
+    // Get TFT delta for this horizon (or closest)
+    let tftDelta = tftDeltaMap.get(horizon)
+    if (tftDelta === undefined && tftPredictions && tftPredictions.length > 0) {
+      // Try to find closest TFT horizon
+      const closestTft = tftPredictions.reduce((prev, curr) =>
+        Math.abs(curr.horizon - horizon) < Math.abs(prev.horizon - horizon) ? curr : prev
+      )
+      if (closestTft && Math.abs(closestTft.horizon - horizon) <= 15) {
+        tftDelta = closestTft.tftDelta
+      }
+    }
+    return {
+      horizon,
+      value: point?.expectedBg ?? 0,
+      actualHorizon: point?.minutesAhead ?? horizon,
+      tftDelta
+    }
+  }).filter(p => p.value > 0)
+
+  if (predictions.length === 0) {
+    return (
+      <div className="flex items-center justify-between text-gray-500">
+        <span>Predicted BG</span>
+        <span className="text-sm italic">No predictions available</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-orange-400">
+          <TrendingUp className="w-4 h-4" />
+          <span className="font-medium">Predicted BG</span>
+          <Badge variant="outline" className="text-[10px] px-1 py-0 border-orange-500/30 text-orange-400">
+            IOB+COB
+          </Badge>
+        </div>
+        <div className="flex items-center gap-1 flex-wrap justify-end">
+          {predictions.map((pred, i) => (
+            <span key={pred.horizon} className="flex items-center">
+              <span
+                className="font-semibold text-sm"
+                style={{ color: getGlucoseColor(pred.value) }}
+                title={`+${pred.actualHorizon}min: ${Math.round(pred.value)} mg/dL${pred.tftDelta !== undefined ? ` (TFT: ${pred.tftDelta >= 0 ? '+' : ''}${pred.tftDelta.toFixed(1)})` : ''}`}
+              >
+                {Math.round(pred.value)}
+              </span>
+              {/* Show TFT delta next to prediction */}
+              {pred.tftDelta !== undefined && (
+                <span
+                  className={cn(
+                    "text-[10px] ml-0.5",
+                    pred.tftDelta >= 0 ? "text-yellow-400" : "text-green-400"
+                  )}
+                  title={`TFT adjusted physics by ${pred.tftDelta >= 0 ? '+' : ''}${pred.tftDelta.toFixed(1)} mg/dL`}
+                >
+                  ({pred.tftDelta >= 0 ? '+' : ''}{pred.tftDelta.toFixed(0)})
+                </span>
               )}
-              style={{ color: getGlucoseColor(val) }}
-            >
-              {Math.round(val)}
+              {i < predictions.length - 1 && (
+                <span className="text-gray-600 mx-1">/</span>
+              )}
             </span>
-            {i < values.length - 1 && (
-              <span className="text-gray-600 mx-1">/</span>
-            )}
+          ))}
+        </div>
+      </div>
+      {/* Time labels */}
+      <div className="flex justify-end gap-2 text-[10px] text-gray-500">
+        {predictions.map((pred, i) => (
+          <span key={pred.horizon}>
+            +{pred.horizon}m
+            {i < predictions.length - 1 && <span className="mx-1">/</span>}
           </span>
         ))}
       </div>
@@ -180,103 +214,105 @@ function PredictionRow({
   )
 }
 
-// Compact predictions for inline display
-export function PredictionsCompact({
-  linear,
-  lstm,
-  className,
-}: {
-  linear: number[]
-  lstm: number[] | null
-  className?: string
-}) {
-  const values = lstm || linear
-  const label = lstm ? 'LSTM' : 'Linear'
+// Data requirements note component
+function DataRequirementsNote({ current, required }: { current: number; required: number }) {
+  const progress = Math.min((current / required) * 100, 100)
+  const minutesNeeded = (required - current) * 5 // 5 min per reading
 
   return (
-    <div className={cn('flex items-center gap-2 text-sm', className)}>
-      <Clock className="w-4 h-4 text-gray-500" />
-      <span className="text-gray-400">+15m:</span>
-      <span
-        className={cn(
-          'font-medium',
-          lstm ? 'text-purple-400' : 'text-gray-400'
-        )}
-        style={{ color: getGlucoseColor(values[2]) }}
-      >
-        {Math.round(values[2])} mg/dL
-      </span>
-      <span className="text-gray-600">({label})</span>
+    <div className="pt-3 border-t border-gray-700/50">
+      <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3">
+        <div className="flex items-start gap-2">
+          <Clock className="w-4 h-4 text-yellow-500 mt-0.5 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm text-yellow-400 font-medium">
+              ML Predictions Require More Data
+            </p>
+            <p className="text-xs text-gray-400 mt-1">
+              LSTM/TFT models need {required} readings ({required * 5} min of data).
+              Currently have {current} readings.
+            </p>
+            <div className="mt-2">
+              <div className="h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-yellow-500 transition-all duration-500"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+              <p className="text-xs text-gray-500 mt-1">
+                ~{minutesNeeded} min until ML predictions available
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
 
-// Prediction timeline view
-export function PredictionTimeline({
-  currentBg,
-  linear,
-  lstm,
-  horizons = [5, 10, 15],
-  className,
-}: {
-  currentBg: number
-  linear: number[]
-  lstm: number[] | null
-  horizons?: number[]
-  className?: string
-}) {
+// Legacy TFT prediction row (fallback)
+function TFTPredictionRow({ predictions }: { predictions: TFTPrediction[] }) {
+  // Sort by horizon
+  const sorted = [...predictions].sort((a, b) => a.horizon - b.horizon)
+
+  // Key horizons to display (show 4-5 to keep compact)
+  const displayHorizons = [15, 30, 60, 120]
+  const displayPreds = sorted.filter(p => displayHorizons.includes(p.horizon))
+
+  // If no matching horizons, show first 4
+  const toShow = displayPreds.length > 0 ? displayPreds : sorted.slice(0, 4)
+
+  // Get 60-min prediction for uncertainty display
+  const pred60 = sorted.find(p => p.horizon === 60) || sorted[Math.min(sorted.length - 1, 5)]
+
   return (
-    <motion.div
-      initial="hidden"
-      animate="visible"
-      variants={fadeIn}
-      className={cn('glass-card p-4', className)}
-    >
-      <h4 className="text-sm font-medium text-gray-400 mb-4 flex items-center gap-2">
-        <Clock className="w-4 h-4" />
-        Prediction Timeline
-      </h4>
-
+    <div className="space-y-2">
       <div className="flex items-center justify-between">
-        {/* Current */}
-        <div className="text-center">
-          <div
-            className="text-2xl font-bold font-orbitron"
-            style={{ color: getGlucoseColor(currentBg) }}
-          >
-            {currentBg}
-          </div>
-          <div className="text-xs text-gray-500 mt-1">Now</div>
+        <div className="flex items-center gap-2 text-orange-400">
+          <TrendingUp className="w-4 h-4" />
+          <span className="font-medium">Predicted BG</span>
+          <Badge variant="outline" className="text-[10px] px-1 py-0 border-orange-500/30 text-orange-400">
+            TFT
+          </Badge>
         </div>
-
-        {/* Arrow */}
-        <div className="flex-1 mx-4 border-t border-dashed border-gray-600 relative">
-          <div className="absolute right-0 top-1/2 -translate-y-1/2 w-0 h-0 border-t-4 border-t-transparent border-b-4 border-b-transparent border-l-4 border-l-gray-600" />
-        </div>
-
-        {/* Predictions */}
-        {horizons.map((horizon, i) => {
-          const linearVal = linear[i]
-          const lstmVal = lstm?.[i]
-          const displayVal = lstmVal ?? linearVal
-
-          return (
-            <div key={horizon} className="text-center">
-              <div
-                className={cn(
-                  'text-xl font-bold font-orbitron',
-                  lstmVal ? 'text-purple-400' : 'text-gray-400'
-                )}
-                style={{ color: getGlucoseColor(displayVal) }}
+        <div className="flex items-center gap-1 flex-wrap justify-end">
+          {toShow.map((pred, i) => (
+            <span key={pred.horizon} className="flex items-center">
+              <span
+                className="font-semibold text-sm"
+                style={{ color: getGlucoseColor(pred.value) }}
+                title={`+${pred.horizon}min: ${Math.round(pred.value)} (${Math.round(pred.lower)}-${Math.round(pred.upper)})`}
               >
-                {Math.round(displayVal)}
-              </div>
-              <div className="text-xs text-gray-500 mt-1">+{horizon}m</div>
-            </div>
-          )
-        })}
+                {Math.round(pred.value)}
+              </span>
+              {i < toShow.length - 1 && (
+                <span className="text-gray-600 mx-1">/</span>
+              )}
+            </span>
+          ))}
+        </div>
       </div>
-    </motion.div>
+      {/* Time labels */}
+      <div className="flex justify-end gap-2 text-[10px] text-gray-500">
+        {toShow.map((pred, i) => (
+          <span key={pred.horizon}>
+            +{pred.horizon}m
+            {i < toShow.length - 1 && <span className="mx-1">/</span>}
+          </span>
+        ))}
+      </div>
+      {/* Uncertainty range at 60 min */}
+      {pred60 && (
+        <div className="flex justify-between items-center">
+          <span className="text-xs text-gray-500">
+            1hr uncertainty:
+          </span>
+          <span className="text-xs text-gray-400">
+            {Math.round(pred60.lower)}-{Math.round(pred60.upper)} mg/dL
+          </span>
+        </div>
+      )}
+    </div>
   )
 }
 

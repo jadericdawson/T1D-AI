@@ -1,0 +1,10 @@
+# T1D-AI Data Sync Azure Functions
+# Shared dependencies for all functions
+
+azure-functions>=1.17.0
+azure-cosmos>=4.5.0
+azure-storage-blob>=12.19.0
+cryptography>=41.0.0
+httpx>=0.25.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0

@@ -71,6 +71,15 @@ class CosmosDBManager:
             ("predictions", "/userId"),
             ("insights", "/userId"),
             ("datasources", "/userId"),
+            ("learned_isf", "/userId"),  # ISF learning per user
+            ("learned_icr", "/userId"),  # ICR learning per user
+            ("learned_pir", "/userId"),  # PIR learning per user
+            ("prediction_outcomes", "/userId"),  # Track predictions vs actual BG for ML training
+            ("ml_training_data", "/userId"),  # Clean training data for ML improvement
+            ("food_profiles", "/userId"),  # Learned food absorption profiles
+            # Multi-person profile support
+            ("profiles", "/accountId"),  # Managed profiles (one account can manage multiple people)
+            ("profile_data_sources", "/profileId"),  # Data sources per profile (Gluroo, Dexcom, etc.)
         ]
 
         for container_name, partition_key in containers:

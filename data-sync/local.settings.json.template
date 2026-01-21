@@ -1,0 +1,12 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "COSMOS_ENDPOINT": "https://knowledge2ai-cosmos-serverless.documents.azure.com:443/",
+    "COSMOS_KEY": "<your-cosmos-key>",
+    "COSMOS_DATABASE": "T1D-AI-DB",
+    "ENCRYPTION_MASTER_KEY": "<your-encryption-key>",
+    "JWT_SECRET_KEY": "<your-jwt-secret>"
+  }
+}

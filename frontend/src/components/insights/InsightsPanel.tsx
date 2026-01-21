@@ -6,7 +6,7 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Sparkles, TrendingUp, Lightbulb, AlertTriangle, Trophy,
-  ChevronRight, RefreshCw, Loader2, Calendar, Clock
+  RefreshCw, Loader2, Calendar
 } from 'lucide-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Button } from '@/components/ui/button'
@@ -14,8 +14,6 @@ import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn, formatTime } from '@/lib/utils'
 import { insightsApi } from '@/lib/api'
-
-const USER_ID = 'demo_user'
 
 // Category icons and colors
 const categoryConfig: Record<string, {
@@ -196,24 +194,24 @@ export function InsightsPanel({ className, compact = false }: InsightsPanelProps
   const [activeTab, setActiveTab] = useState<'insights' | 'weekly'>('insights')
   const queryClient = useQueryClient()
 
-  // Fetch insights
+  // Fetch insights (JWT auth - no userId needed)
   const { data: insightsData, isLoading: loadingInsights } = useQuery({
-    queryKey: ['insights', USER_ID],
-    queryFn: () => insightsApi.getAll(USER_ID, undefined, 10),
+    queryKey: ['insights'],
+    queryFn: () => insightsApi.getAll(undefined, 10),
     staleTime: 300000, // 5 minutes
   })
 
-  // Fetch weekly summary
+  // Fetch weekly summary (JWT auth - no userId needed)
   const { data: weeklyData, isLoading: loadingWeekly } = useQuery({
-    queryKey: ['insights', 'weekly', USER_ID],
-    queryFn: () => insightsApi.getWeeklySummary(USER_ID),
+    queryKey: ['insights', 'weekly'],
+    queryFn: () => insightsApi.getWeeklySummary(),
     staleTime: 3600000, // 1 hour
     retry: false,
   })
 
-  // Generate new insights
+  // Generate new insights (JWT auth - no userId needed)
   const generateMutation = useMutation({
-    mutationFn: () => insightsApi.generate(USER_ID, true),
+    mutationFn: () => insightsApi.generate(true),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['insights'] })
     }

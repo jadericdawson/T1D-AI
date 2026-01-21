@@ -98,7 +98,7 @@ const initialState = {
 
 export const useGlucoseStore = create<GlucoseState>()(
   persist(
-    (set, get) => ({
+    (set) => ({
       ...initialState,
 
       setCurrentGlucose: (reading) =>

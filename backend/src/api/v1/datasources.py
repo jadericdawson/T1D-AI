@@ -3,16 +3,19 @@ Data Sources API Endpoints for T1D-AI
 Manages connections to external data sources (Gluroo).
 """
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, Depends
 from pydantic import BaseModel
 
-from models.schemas import DataSource, GlurooCredentials
+from models.schemas import DataSource, GlurooCredentials, User, TreatmentType
 from database.repositories import DataSourceRepository, GlucoseRepository, TreatmentRepository
 from services.gluroo_service import GlurooService, create_gluroo_service
+from services.food_enrichment_service import food_enrichment_service
+from utils.encryption import encrypt_secret, decrypt_secret
+from auth import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -20,9 +23,6 @@ router = APIRouter()
 datasource_repo = DataSourceRepository()
 glucose_repo = GlucoseRepository()
 treatment_repo = TreatmentRepository()
-
-# Temporary: hardcoded user ID until auth is implemented
-TEMP_USER_ID = "demo_user"
 
 
 class ConnectGlurooRequest(BaseModel):
@@ -65,13 +65,14 @@ async def test_gluroo_connection(request: ConnectGlurooRequest):
 @router.post("/gluroo/connect", response_model=DataSource)
 async def connect_gluroo(
     request: ConnectGlurooRequest,
-    user_id: str = Query(default=TEMP_USER_ID)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Connect Gluroo account.
 
     Saves encrypted credentials and performs initial data sync.
     """
+    user_id = current_user.id
     try:
         # Test connection first
         service = GlurooService(request.url, request.apiSecret)
@@ -80,14 +81,16 @@ async def connect_gluroo(
         if not success:
             raise HTTPException(status_code=400, detail=f"Connection failed: {message}")
 
-        # TODO: Encrypt the API secret before storing
-        # For now, we'll hash it (in production, use proper encryption)
-        import hashlib
-        encrypted_secret = hashlib.sha256(request.apiSecret.encode()).hexdigest()
+        # Encrypt the API secret for secure storage
+        try:
+            encrypted_secret = encrypt_secret(request.apiSecret)
+        except Exception as e:
+            logger.error(f"Encryption error: {e}")
+            raise HTTPException(status_code=500, detail="Failed to secure credentials")
 
         credentials = GlurooCredentials(
             url=request.url,
-            apiSecretEncrypted=encrypted_secret,  # Should be properly encrypted
+            apiSecretEncrypted=encrypted_secret,
             lastSyncAt=None,
             syncEnabled=True
         )
@@ -114,12 +117,13 @@ async def connect_gluroo(
 
 
 @router.delete("/gluroo")
-async def disconnect_gluroo(user_id: str = Query(default=TEMP_USER_ID)):
+async def disconnect_gluroo(current_user: User = Depends(get_current_user)):
     """
     Disconnect Gluroo account.
 
     Removes stored credentials but does not delete synced data.
     """
+    user_id = current_user.id
     try:
         deleted = await datasource_repo.delete(user_id, "gluroo")
         if not deleted:
@@ -137,48 +141,156 @@ async def disconnect_gluroo(user_id: str = Query(default=TEMP_USER_ID)):
 
 @router.post("/gluroo/sync", response_model=SyncResponse)
 async def sync_gluroo(
-    user_id: str = Query(default=TEMP_USER_ID),
-    full_sync: bool = Query(default=False, description="Perform full sync instead of incremental")
+    full_sync: bool = Query(default=False, description="Perform full sync instead of incremental"),
+    current_user: User = Depends(get_current_user)
 ):
     """
     Sync data from Gluroo.
 
     Fetches new glucose readings and treatments from Gluroo API.
+    Performs incremental sync by default (since last sync).
+    Use full_sync=true to fetch all available data.
     """
+    user_id = current_user.id
     try:
         # Get stored credentials
         datasource = await datasource_repo.get(user_id, "gluroo")
         if not datasource:
             raise HTTPException(status_code=404, detail="Gluroo not connected")
 
-        # TODO: Decrypt the API secret
-        # For now, this won't work without the original secret
-        # In production, use proper encryption/decryption
+        if not datasource.credentials or not datasource.credentials.apiSecretEncrypted:
+            raise HTTPException(status_code=400, detail="Invalid stored credentials")
 
-        raise HTTPException(
-            status_code=501,
-            detail="Sync requires decryption of stored credentials (not yet implemented)"
+        # Decrypt the API secret
+        try:
+            api_secret = decrypt_secret(datasource.credentials.apiSecretEncrypted)
+        except ValueError as e:
+            logger.error(f"Failed to decrypt credentials for user {user_id}: {e}")
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot decrypt stored credentials. Please reconnect Gluroo."
+            )
+
+        # Create Gluroo service
+        service = GlurooService(datasource.credentials.url, api_secret)
+
+        # Determine sync window
+        since = None
+        if not full_sync and datasource.credentials.lastSyncAt:
+            # Incremental sync - fetch since last sync minus 1 hour buffer
+            since = datasource.credentials.lastSyncAt - timedelta(hours=1)
+            logger.info(f"Incremental sync for user {user_id} since {since}")
+        else:
+            # Full sync - fetch last 30 days (or max Gluroo provides)
+            since = datetime.now(timezone.utc) - timedelta(days=30)
+            logger.info(f"Full sync for user {user_id} since {since}")
+
+        # Fetch glucose readings
+        glucose_readings = await service.fetch_glucose_entries(
+            user_id=user_id,
+            count=1000,
+            since=since
         )
 
-        # When implemented, this would:
-        # 1. Decrypt the stored API secret
-        # 2. Create GlurooService with decrypted credentials
-        # 3. Fetch glucose and treatment data
-        # 4. Store in CosmosDB
-        # 5. Update lastSyncAt
+        # Fetch treatments (insulin and carbs)
+        treatments = await service.fetch_all_treatments(
+            user_id=user_id,
+            count=500,
+            since=since
+        )
+
+        # Store glucose readings in CosmosDB (upsert to avoid duplicates)
+        glucose_count = 0
+        for reading in glucose_readings:
+            try:
+                await glucose_repo.upsert(reading)
+                glucose_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to store glucose reading: {e}")
+
+        # Store treatments in CosmosDB (upsert to avoid duplicates)
+        # Enrich carb treatments with GPT-4.1 macro estimation
+        treatment_count = 0
+        for treatment in treatments:
+            try:
+                # Enrich carb treatments that have food notes but missing protein/fat
+                if (treatment.type == TreatmentType.CARBS and
+                    treatment.carbs and
+                    treatment.notes and treatment.notes.strip() and
+                    (not treatment.protein or not treatment.fat)):
+                    try:
+                        await food_enrichment_service.initialize()
+
+                        # Step 1: Estimate protein/fat from food description
+                        macro_estimate = await food_enrichment_service.estimate_macros_from_description(
+                            food_description=treatment.notes,
+                            known_carbs=treatment.carbs
+                        )
+                        if not treatment.protein:
+                            treatment.protein = macro_estimate.protein_g
+                        if not treatment.fat:
+                            treatment.fat = macro_estimate.fat_g
+
+                        logger.info(
+                            f"AI macro estimation for '{treatment.notes[:40]}': "
+                            f"protein={treatment.protein:.1f}g, fat={treatment.fat:.1f}g"
+                        )
+
+                        # Step 2: Get glycemic features
+                        features = await food_enrichment_service.extract_food_features(
+                            food_text=treatment.notes,
+                            carbs=treatment.carbs,
+                            protein=treatment.protein or 0,
+                            fat=treatment.fat or 0
+                        )
+                        treatment.glycemicIndex = features.glycemic_index
+                        treatment.glycemicLoad = features.glycemic_load
+                        treatment.absorptionRate = features.absorption_rate
+                        treatment.fatContent = features.fat_content
+                        treatment.isLiquid = features.is_liquid
+                        treatment.enrichedAt = datetime.now(timezone.utc)
+
+                        logger.info(
+                            f"Enriched Gluroo treatment: GI={features.glycemic_index}, "
+                            f"absorption={features.absorption_rate}"
+                        )
+                    except Exception as enrich_err:
+                        logger.warning(f"Failed to enrich treatment: {enrich_err}")
+
+                await treatment_repo.upsert(treatment)
+                treatment_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to store treatment: {e}")
+
+        # Update last sync timestamp
+        now = datetime.now(timezone.utc)
+        datasource.credentials.lastSyncAt = now
+        await datasource_repo.update(datasource)
+
+        logger.info(
+            f"Sync completed for user {user_id}: "
+            f"{glucose_count} glucose readings, {treatment_count} treatments"
+        )
+
+        return SyncResponse(
+            glucoseReadings=glucose_count,
+            treatments=treatment_count,
+            lastSyncAt=now
+        )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error syncing Gluroo: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"Error syncing Gluroo: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
 
 
 @router.get("/gluroo/status")
-async def get_gluroo_status(user_id: str = Query(default=TEMP_USER_ID)):
+async def get_gluroo_status(current_user: User = Depends(get_current_user)):
     """
     Get Gluroo connection status.
     """
+    user_id = current_user.id
     try:
         datasource = await datasource_repo.get(user_id, "gluroo")
 
@@ -200,3 +312,50 @@ async def get_gluroo_status(user_id: str = Query(default=TEMP_USER_ID)):
     except Exception as e:
         logger.error(f"Error getting Gluroo status: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/gluroo/defaults")
+async def get_gluroo_defaults(current_user: User = Depends(get_current_user)):
+    """
+    Get default Gluroo configuration for auto-fill.
+
+    Only returns credentials for the owner's account (hardcoded in gluroo_sync.py).
+    Other users get empty defaults.
+    """
+    try:
+        # Import the hardcoded config from gluroo_sync
+        from services.gluroo_sync import GLUROO_URL, GLUROO_API_SECRET, USER_ID as OWNER_USER_ID
+
+        # Only return credentials for the owner's account
+        if current_user.id == OWNER_USER_ID:
+            return {
+                "url": GLUROO_URL,
+                "apiSecret": GLUROO_API_SECRET,
+                "syncInterval": 5,
+                "isOwner": True
+            }
+        else:
+            # Return empty defaults for other users
+            return {
+                "url": "",
+                "apiSecret": "",
+                "syncInterval": 5,
+                "isOwner": False
+            }
+
+    except ImportError:
+        # If gluroo_sync module is not available, return empty defaults
+        return {
+            "url": "",
+            "apiSecret": "",
+            "syncInterval": 5,
+            "isOwner": False
+        }
+    except Exception as e:
+        logger.error(f"Error getting Gluroo defaults: {e}")
+        return {
+            "url": "",
+            "apiSecret": "",
+            "syncInterval": 5,
+            "isOwner": False
+        }
