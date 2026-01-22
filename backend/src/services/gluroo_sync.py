@@ -52,6 +52,14 @@ except ImportError:
     get_data_source_manager = None
     DataSourceManager = None
 
+# Import ML data collector for prediction accuracy tracking
+try:
+    from services.ml_data_collector import MLDataCollector
+    ML_DATA_COLLECTOR_AVAILABLE = True
+except ImportError:
+    ML_DATA_COLLECTOR_AVAILABLE = False
+    MLDataCollector = None
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -327,6 +335,27 @@ class GlurooSyncService:
         except Exception as e:
             logger.warning(f"Enhanced ISF learning failed (non-critical): {e}")
 
+    async def _collect_prediction_checkpoints(self):
+        """
+        Collect prediction checkpoints when new glucose data arrives.
+
+        This fills in actualBg30/60/90 for pending MLTrainingDataPoints,
+        enabling continuous comparison of predictions vs actual BG values.
+        """
+        if not ML_DATA_COLLECTOR_AVAILABLE:
+            return
+
+        try:
+            collector = MLDataCollector()
+            collected = await collector.collect_all_pending_checkpoints(USER_ID)
+
+            if collected > 0:
+                logger.info(f"Collected {collected} prediction checkpoints for accuracy tracking")
+
+        except Exception as e:
+            # Don't fail sync if checkpoint collection fails
+            logger.debug(f"Prediction checkpoint collection failed (non-critical): {e}")
+
     async def _enrich_carb_treatment(self, doc: dict) -> dict:
         """
         Enrich carb treatment with GPT-4.1 macro estimation and GI prediction.
@@ -475,6 +504,11 @@ class GlurooSyncService:
         # Trigger ML learning after sync (runs periodically, not every sync)
         if glucose_count > 0 or treatment_count > 0:
             await self._trigger_isf_learning()
+
+        # Collect prediction checkpoints when new glucose data arrives
+        # This fills in actualBg30/60/90 for pending training data points
+        if glucose_count > 0:
+            await self._collect_prediction_checkpoints()
 
         # DISABLED: Auto-inference was causing unwanted treatments to be created
         # The frontend toggles (autoSyncInsulin/autoSyncCarbs) do not control this backend logic
