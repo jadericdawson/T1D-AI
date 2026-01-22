@@ -1252,25 +1252,21 @@ class IOBCOBService:
         )
 
         # PRIORITY CASE: ML predicts a LOW in the next hour - recommend food NOW
-        LOW_THRESHOLD = 80  # Below this is concerning
-        URGENT_LOW_THRESHOLD = 70  # Below this is urgent
+        # Only recommend food if BG predicted to drop below 70 (actual low risk)
+        LOW_THRESHOLD = 70  # Recommend food below this
+        URGENT_LOW_THRESHOLD = 55  # Below this is urgent
 
-        if ml_min_bg is not None and ml_min_bg < self.target_bg:
-            # Calculate carbs needed to prevent the low
-            # How much will BG drop from current? That's the deficit we need to cover
+        if ml_min_bg is not None and ml_min_bg < LOW_THRESHOLD:
+            # Calculate carbs to bring BG back to target (100)
             bg_deficit = self.target_bg - ml_min_bg
-
-            # Each gram of carbs raises BG by ~4 mg/dL (carb_bg_factor)
             carbs_needed = bg_deficit / self.carb_bg_factor if self.carb_bg_factor > 0 else 15
-
-            # Round to nearest 5g for practical eating
             carbs_needed = round(carbs_needed / 5) * 5
             carbs_needed = max(5, min(carbs_needed, 60))  # 5-60g range
 
-            # Predict BG with food
-            predicted_with_food = ml_min_bg + (carbs_needed * self.carb_bg_factor * 0.7)  # 70% absorbed by low point
+            # Predict BG with food (70% absorbed by the low point)
+            predicted_with_food = ml_min_bg + (carbs_needed * self.carb_bg_factor * 0.7)
 
-            # Get food suggestions
+            # Get food suggestions from user's history
             food_suggestions = self.get_food_suggestions_from_history(
                 user_treatments, target_carbs=carbs_needed
             )
@@ -1283,7 +1279,7 @@ class IOBCOBService:
             recommendation.predicted_bg_with_action = int(round(predicted_with_food))
             recommendation.reasoning = (
                 f"{urgency}ML predicts BG dropping to {ml_min_bg:.0f} at +{ml_min_horizon}min. "
-                f"Eat ~{carbs_needed:.0f}g carbs now to stay above {self.target_bg}."
+                f"Eat ~{carbs_needed:.0f}g carbs to prevent low."
             )
 
             logger.info(
