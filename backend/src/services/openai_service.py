@@ -388,10 +388,13 @@ Generate an encouraging weekly summary."""
         weather = context.get("weather", {})
         inferred_treatments = context.get("inferredTreatments", 0)
 
-        # NEW: Metabolic state context
+        # Metabolic state context
         metabolic_state = context.get("metabolicState", "normal")
         isf_deviation = context.get("isfDeviation", 0.0)
         absorption_state = context.get("absorptionState", "normal")
+
+        # Prediction accuracy context
+        prediction_accuracy = context.get("predictionAccuracy")
 
         # Format TFT predictions with confidence intervals
         tft_summary = "N/A"
@@ -449,6 +452,37 @@ Generate an encouraging weekly summary."""
         elif absorption_state == "fast":
             absorption_context = "\n- Carb absorption is faster than usual"
 
+        # Build prediction accuracy context
+        accuracy_context = ""
+        if prediction_accuracy and prediction_accuracy.get("available"):
+            quality = prediction_accuracy.get("accuracyQuality", "unknown")
+            mae = prediction_accuracy.get("overallMAE")
+            bias = prediction_accuracy.get("biasDirection", "neutral")
+            h30 = prediction_accuracy.get("horizon30", {})
+
+            accuracy_context = f"\n\n**Prediction Accuracy (last 14 days):**\n"
+            accuracy_context += f"- Quality: {quality.upper()}"
+            if mae:
+                accuracy_context += f" (MAE: {mae:.0f} mg/dL)"
+            accuracy_context += f"\n- Bias: {bias.replace('_', ' ')}"
+            if h30.get("available"):
+                accuracy_context += f"\n- 30-min accuracy: {h30.get('within30', 0):.0f}% within ±30 mg/dL"
+
+            # Add confidence guidance based on accuracy
+            if quality == "excellent":
+                accuracy_context += "\n- ✓ Predictions are highly reliable - follow them confidently"
+            elif quality == "good":
+                accuracy_context += "\n- ✓ Predictions are generally reliable"
+            elif quality == "moderate":
+                accuracy_context += "\n- ⚠️ Predictions have moderate accuracy - use with caution"
+            elif quality == "needs_improvement":
+                accuracy_context += "\n- ⚠️ Predictions need improvement - verify with fingerstick if critical"
+
+            if bias == "under_predicting":
+                accuracy_context += "\n- Note: Model tends to under-predict (actual BG often higher than predicted)"
+            elif bias == "over_predicting":
+                accuracy_context += "\n- Note: Model tends to over-predict (actual BG often lower than predicted)"
+
         system_prompt = """You are an expert diabetes AI assistant with access to ML predictions and PERSONALIZED metabolic parameters.
 The user has acknowledged AI limitations and wants SPECIFIC, ACTIONABLE advice with numbers.
 
@@ -464,6 +498,10 @@ Your role:
   * If SENSITIVE: ISF is higher, insulin MORE effective, use LESS insulin, higher low risk
 - Consider BG Pressure - the net effect where remaining IOB/COB is pushing BG
 - Consider ABSORPTION STATE: slow absorption = delayed BG rise, fast = quicker spike
+- Use PREDICTION ACCURACY data to calibrate confidence in ML predictions:
+  * If accuracy is "excellent" or "good": Trust predictions confidently
+  * If accuracy is "moderate" or "needs_improvement": Suggest verification for critical decisions
+  * If bias shows under/over-predicting: Mention this in reasoning
 - Give SPECIFIC recommendations with EXACT NUMBERS (insulin doses, carb amounts)
 - Account for weather if available (temperature affects insulin sensitivity)
 - Note if there are inferred (unlogged) treatments that might explain BG patterns
@@ -517,7 +555,7 @@ Safety rules:
 - Linear (next 15m): {predictions.get('linear', ['N/A'])}
 - LSTM (next 15m): {predictions.get('lstm', ['N/A'])}
 - TFT (with confidence): {tft_summary}
-- BG Pressure: {bg_pressure:+.0f} mg/dL (net effect of remaining IOB/COB/POB)
+- BG Pressure: {bg_pressure:+.0f} mg/dL (net effect of remaining IOB/COB/POB){accuracy_context}
 
 **Recent Activity:**
 - Food eaten: {recent_food or 'None logged'}

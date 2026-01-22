@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 import statistics
 
-from database.repositories import GlucoseRepository, TreatmentRepository, InsightRepository, UserRepository
+from database.repositories import GlucoseRepository, TreatmentRepository, InsightRepository, UserRepository, MLTrainingDataRepository
 from services.openai_service import openai_service
 from models.schemas import AIInsight
 from config import get_settings
@@ -21,6 +21,7 @@ glucose_repo = GlucoseRepository()
 treatment_repo = TreatmentRepository()
 insight_repo = InsightRepository()
 user_repo = UserRepository()
+ml_training_repo = MLTrainingDataRepository()
 
 
 @dataclass
@@ -351,6 +352,100 @@ class InsightService:
 
         return filtered[:20]  # Limit to 20 anomalies
 
+    async def get_prediction_accuracy(
+        self,
+        user_id: str,
+        days: int = 14
+    ) -> Dict[str, Any]:
+        """
+        Calculate prediction accuracy stats from historical data.
+
+        Returns metrics showing how well the ML predictions have matched
+        actual BG outcomes at +30, +60, +90 minute horizons.
+        """
+        try:
+            # Get completed training data points
+            data_points = await ml_training_repo.get_recent_complete(user_id, days=days, limit=200)
+
+            if len(data_points) < 5:
+                return {
+                    "available": False,
+                    "message": "Insufficient data for accuracy calculation",
+                    "dataPoints": len(data_points),
+                    "minimumRequired": 5
+                }
+
+            # Calculate accuracy stats for each horizon
+            errors_30 = [dp.error30 for dp in data_points if dp.error30 is not None]
+            errors_60 = [dp.error60 for dp in data_points if dp.error60 is not None]
+            errors_90 = [dp.error90 for dp in data_points if dp.error90 is not None]
+
+            def calc_stats(errors: List[float]) -> Dict[str, float]:
+                if not errors:
+                    return {"available": False}
+                abs_errors = [abs(e) for e in errors]
+                return {
+                    "available": True,
+                    "count": len(errors),
+                    "meanError": round(statistics.mean(errors), 1),  # Bias (+ = under-predicting)
+                    "meanAbsError": round(statistics.mean(abs_errors), 1),  # MAE
+                    "medianAbsError": round(statistics.median(abs_errors), 1),
+                    "stdError": round(statistics.stdev(errors), 1) if len(errors) > 1 else 0,
+                    "within20": round(sum(1 for e in abs_errors if e <= 20) / len(errors) * 100, 0),  # % within 20 mg/dL
+                    "within30": round(sum(1 for e in abs_errors if e <= 30) / len(errors) * 100, 0),  # % within 30 mg/dL
+                }
+
+            stats_30 = calc_stats(errors_30)
+            stats_60 = calc_stats(errors_60)
+            stats_90 = calc_stats(errors_90)
+
+            # Overall accuracy assessment
+            overall_mae = None
+            if errors_30 and errors_60:
+                all_abs_errors = [abs(e) for e in errors_30 + errors_60]
+                overall_mae = round(statistics.mean(all_abs_errors), 1)
+
+            # Determine accuracy quality
+            accuracy_quality = "unknown"
+            if overall_mae is not None:
+                if overall_mae <= 15:
+                    accuracy_quality = "excellent"
+                elif overall_mae <= 25:
+                    accuracy_quality = "good"
+                elif overall_mae <= 40:
+                    accuracy_quality = "moderate"
+                else:
+                    accuracy_quality = "needs_improvement"
+
+            # Check for systematic bias
+            bias_direction = "neutral"
+            if errors_30:
+                mean_bias = statistics.mean(errors_30)
+                if mean_bias > 10:
+                    bias_direction = "under_predicting"  # Actual higher than predicted
+                elif mean_bias < -10:
+                    bias_direction = "over_predicting"  # Actual lower than predicted
+
+            return {
+                "available": True,
+                "dataPoints": len(data_points),
+                "periodDays": days,
+                "horizon30": stats_30,
+                "horizon60": stats_60,
+                "horizon90": stats_90,
+                "overallMAE": overall_mae,
+                "accuracyQuality": accuracy_quality,
+                "biasDirection": bias_direction,
+                "generatedAt": datetime.utcnow().isoformat()
+            }
+
+        except Exception as e:
+            logger.warning(f"Error calculating prediction accuracy: {e}")
+            return {
+                "available": False,
+                "error": str(e)
+            }
+
     async def analyze_meal_impact(
         self,
         user_id: str,
@@ -616,6 +711,13 @@ class InsightService:
             Real-time insight with advice
         """
         try:
+            # Fetch prediction accuracy stats (non-blocking, fails gracefully)
+            prediction_accuracy = None
+            try:
+                prediction_accuracy = await self.get_prediction_accuracy(user_id, days=14)
+            except Exception as e:
+                logger.debug(f"Could not fetch prediction accuracy: {e}")
+
             # Build context for GPT with all available data including metabolic state
             context = {
                 "currentBg": current_bg,
@@ -634,10 +736,12 @@ class InsightService:
                 "tftPredictions": tft_predictions or [],
                 "recentGI": recent_gi,
                 "absorptionRate": absorption_rate,
-                # NEW: Metabolic state context for illness-aware recommendations
+                # Metabolic state context for illness-aware recommendations
                 "metabolicState": metabolic_state or "normal",
                 "isfDeviation": isf_deviation or 0.0,
-                "absorptionState": absorption_state or "normal"
+                "absorptionState": absorption_state or "normal",
+                # Prediction accuracy - helps AI calibrate confidence in predictions
+                "predictionAccuracy": prediction_accuracy
             }
 
             # Use GPT to generate real-time advice
