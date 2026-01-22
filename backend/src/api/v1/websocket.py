@@ -234,12 +234,40 @@ async def get_glucose_update(user_id: str) -> dict:
         # Get PIR from settings (default 25g protein per unit)
         pir = getattr(settings, 'default_pir', 25.0)
 
+        # Convert TFT predictions to dict format for metrics calculation
+        # TFT predictions show +30, +45, +60 min - crucial for detecting upcoming lows
+        ml_predictions = None
+        if prediction.tft:
+            ml_predictions = [
+                {
+                    'horizon_min': p.horizon_min,
+                    'value': p.value,
+                    'lower': p.lower,
+                    'upper': p.upper
+                }
+                for p in prediction.tft
+            ]
+            logger.debug(f"Passing TFT predictions to metrics: {ml_predictions}")
+
+        # Also include LSTM predictions at +5, +10, +15 for near-term lows
+        if prediction.lstm:
+            lstm_preds = [
+                {'horizon_min': h, 'value': v, 'lower': v, 'upper': v}
+                for h, v in zip([5, 10, 15], prediction.lstm)
+            ]
+            if ml_predictions:
+                ml_predictions = lstm_preds + ml_predictions
+            else:
+                ml_predictions = lstm_preds
+
         # Calculate complete metrics using get_current_metrics (includes POB, dose, protein dose)
+        # Pass ML predictions so food recommendations can detect predicted lows
         metrics = iob_cob_service.get_current_metrics(
             current_bg=latest.value,
             treatments=treatments,
             isf=prediction.isf,
-            pir=pir
+            pir=pir,
+            ml_predictions=ml_predictions
         )
 
         # Build response

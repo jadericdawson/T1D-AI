@@ -1191,15 +1191,19 @@ class IOBCOBService:
         cob: float,
         isf: float,
         pob: float = 0.0,
-        user_treatments: Optional[List[Treatment]] = None
+        user_treatments: Optional[List[Treatment]] = None,
+        ml_predictions: Optional[List[Dict[str, Any]]] = None
     ) -> DoseRecommendation:
         """
         Calculate complete recommendation: dose AND/OR food to reach target 100.
 
         This method:
-        1. Predicts BG at 3 hours without any action
-        2. If BG will be HIGH: recommends insulin dose
-        3. If BG will be LOW: recommends carbs and suggests foods from user's history
+        1. Uses ML predictions (TFT) to find the MINIMUM predicted BG in the next hour
+        2. If BG will drop LOW: recommends carbs to prevent the low
+        3. If BG will be HIGH: recommends insulin dose
+
+        IMPORTANT: We prioritize the ML predictions (TFT) over simple physics calculations
+        because ML captures real-world dynamics that physics misses.
 
         Args:
             current_bg: Current blood glucose in mg/dL
@@ -1208,6 +1212,7 @@ class IOBCOBService:
             isf: Insulin Sensitivity Factor (mg/dL per unit)
             pob: Current Protein on Board (grams)
             user_treatments: User's historical treatments for food suggestions
+            ml_predictions: Optional ML prediction values [{horizon_min, value, lower, upper}, ...]
 
         Returns:
             DoseRecommendation with complete advice
@@ -1215,14 +1220,30 @@ class IOBCOBService:
         TARGET_TIME_MIN = 180.0
         user_treatments = user_treatments or []
 
-        # Predict BG at target time without any action
+        # PRIORITY: Check ML predictions for predicted lows in the next 60 minutes
+        # This is critical because IOB will continue dropping BG before recovering
+        ml_min_bg = None
+        ml_min_horizon = None
+        if ml_predictions:
+            for pred in ml_predictions:
+                # Use the 'value' field (median prediction) or 'lower' for safety
+                pred_value = pred.get('value') or pred.get('lower')
+                if pred_value is not None:
+                    if ml_min_bg is None or pred_value < ml_min_bg:
+                        ml_min_bg = pred_value
+                        ml_min_horizon = pred.get('horizon_min', 0)
+
+            if ml_min_bg is not None:
+                logger.info(f"ML predictions: min BG = {ml_min_bg:.0f} at +{ml_min_horizon}min")
+
+        # Physics-based prediction for 3-hour target
         predicted_bg_no_action = self._predict_bg_at_time(
             current_bg, iob, cob, pob, isf, new_dose=0.0, target_time_min=TARGET_TIME_MIN
         )
 
         recommendation = DoseRecommendation(
             current_bg=current_bg,
-            predicted_bg_without_action=int(round(predicted_bg_no_action)),
+            predicted_bg_without_action=int(round(ml_min_bg if ml_min_bg else predicted_bg_no_action)),
             target_bg=self.target_bg,
             iob=iob,
             cob=cob,
@@ -1230,11 +1251,53 @@ class IOBCOBService:
             isf=isf
         )
 
-        # Case 1: BG predicted to be at target (within ±5)
-        if abs(predicted_bg_no_action - self.target_bg) <= 5:
+        # PRIORITY CASE: ML predicts a LOW in the next hour - recommend food NOW
+        LOW_THRESHOLD = 80  # Below this is concerning
+        URGENT_LOW_THRESHOLD = 70  # Below this is urgent
+
+        if ml_min_bg is not None and ml_min_bg < self.target_bg:
+            # Calculate carbs needed to prevent the low
+            # How much will BG drop from current? That's the deficit we need to cover
+            bg_deficit = self.target_bg - ml_min_bg
+
+            # Each gram of carbs raises BG by ~4 mg/dL (carb_bg_factor)
+            carbs_needed = bg_deficit / self.carb_bg_factor if self.carb_bg_factor > 0 else 15
+
+            # Round to nearest 5g for practical eating
+            carbs_needed = round(carbs_needed / 5) * 5
+            carbs_needed = max(5, min(carbs_needed, 60))  # 5-60g range
+
+            # Predict BG with food
+            predicted_with_food = ml_min_bg + (carbs_needed * self.carb_bg_factor * 0.7)  # 70% absorbed by low point
+
+            # Get food suggestions
+            food_suggestions = self.get_food_suggestions_from_history(
+                user_treatments, target_carbs=carbs_needed
+            )
+
+            urgency = "URGENT: " if ml_min_bg < URGENT_LOW_THRESHOLD else ""
+
+            recommendation.recommended_carbs = carbs_needed
+            recommendation.food_suggestions = food_suggestions
+            recommendation.action_type = "food"
+            recommendation.predicted_bg_with_action = int(round(predicted_with_food))
+            recommendation.reasoning = (
+                f"{urgency}ML predicts BG dropping to {ml_min_bg:.0f} at +{ml_min_horizon}min. "
+                f"Eat ~{carbs_needed:.0f}g carbs now to stay above {self.target_bg}."
+            )
+
+            logger.info(
+                f"FOOD RECOMMENDATION (ML): BG={current_bg}, Predicted low={ml_min_bg:.0f} at +{ml_min_horizon}min, "
+                f"Carbs needed={carbs_needed:.0f}g -> Final={predicted_with_food:.0f}"
+            )
+            return recommendation
+
+        # Case 1: BG predicted to be at target (within ±5) - check both ML and physics
+        effective_prediction = ml_min_bg if ml_min_bg else predicted_bg_no_action
+        if abs(effective_prediction - self.target_bg) <= 5:
             recommendation.action_type = "none"
-            recommendation.predicted_bg_with_action = int(round(predicted_bg_no_action))
-            recommendation.reasoning = f"BG predicted to be {predicted_bg_no_action:.0f} at 3hr, already at target."
+            recommendation.predicted_bg_with_action = int(round(effective_prediction))
+            recommendation.reasoning = f"BG predicted to be {effective_prediction:.0f}, already at target."
             return recommendation
 
         # Case 2: BG predicted HIGH -> recommend insulin
@@ -1321,7 +1384,8 @@ class IOBCOBService:
         current_bg: int,
         treatments: List[Treatment],
         isf: float,
-        pir: float = 25.0
+        pir: float = 25.0,
+        ml_predictions: Optional[List[Dict[str, Any]]] = None
     ) -> CurrentMetrics:
         """
         Calculate all current metrics for display.
@@ -1331,6 +1395,8 @@ class IOBCOBService:
             treatments: Recent treatments for IOB/COB/POB calculation
             isf: Predicted ISF value
             pir: Protein-to-insulin ratio (grams per unit)
+            ml_predictions: Optional ML prediction values [{horizon_min, value, lower, upper}, ...]
+                           Used to detect predicted lows for food recommendations
 
         Returns:
             CurrentMetrics with all calculated values including POB and protein dose
@@ -1339,14 +1405,15 @@ class IOBCOBService:
         cob = self.calculate_cob(treatments)
         pob = self.calculate_pob(treatments)
 
-        # Get full recommendation (dose + food)
+        # Get full recommendation (dose + food) - pass ML predictions for accurate low detection
         full_rec = self.calculate_full_recommendation(
             current_bg=current_bg,
             iob=iob,
             cob=cob,
             isf=isf,
             pob=pob,
-            user_treatments=treatments  # Pass treatments for food history
+            user_treatments=treatments,  # Pass treatments for food history
+            ml_predictions=ml_predictions  # Pass ML predictions for low detection
         )
         dose = full_rec.recommended_dose
         effective_bg = full_rec.predicted_bg_with_action

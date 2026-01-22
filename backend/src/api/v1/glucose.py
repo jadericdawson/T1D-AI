@@ -362,12 +362,36 @@ async def get_current_glucose(
         except Exception as e:
             logger.warning(f"Failed to get effective PIR, using default: {e}")
 
-        # Calculate metrics with predicted ISF and PIR
+        # Convert ML predictions to dict format for food recommendation
+        ml_predictions = None
+        if prediction_result.tft:
+            ml_predictions = [
+                {
+                    'horizon_min': p.horizon_min,
+                    'value': p.value,
+                    'lower': p.lower,
+                    'upper': p.upper
+                }
+                for p in prediction_result.tft
+            ]
+        # Also include LSTM predictions for near-term lows
+        if prediction_result.lstm:
+            lstm_preds = [
+                {'horizon_min': h, 'value': v, 'lower': v, 'upper': v}
+                for h, v in zip([5, 10, 15], prediction_result.lstm)
+            ]
+            if ml_predictions:
+                ml_predictions = lstm_preds + ml_predictions
+            else:
+                ml_predictions = lstm_preds
+
+        # Calculate metrics with predicted ISF and PIR - pass ML predictions for food recommendations
         metrics = iob_cob_service.get_current_metrics(
             current_bg=latest.value,
             treatments=treatments,
             isf=isf,
-            pir=pir
+            pir=pir,
+            ml_predictions=ml_predictions
         )
 
         # Build predictions response
