@@ -13,8 +13,9 @@ ML Models:
 """
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
+from dataclasses import dataclass, field, asdict
 import torch
 
 from models.schemas import Treatment, GlucoseReading, CurrentMetrics, UserAbsorptionProfile
@@ -22,6 +23,51 @@ from config import get_settings
 from ml.models.forcing_ensemble import get_forcing_ensemble
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FoodSuggestion:
+    """A food suggestion based on user's historical eating patterns."""
+    name: str  # Food name/description
+    carbs: float  # Carbs in grams
+    typical_portion: str  # e.g., "1 slice", "1 cup"
+    glycemic_index: Optional[int] = None
+    times_eaten: int = 1  # How often user has eaten this
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DoseRecommendation:
+    """Complete recommendation for dose and/or food to reach target BG."""
+    # Insulin recommendation (if BG predicted high)
+    recommended_dose: float = 0.0
+
+    # Food recommendation (if BG predicted low)
+    recommended_carbs: float = 0.0
+    food_suggestions: List[FoodSuggestion] = field(default_factory=list)
+
+    # Predictions
+    current_bg: int = 0
+    predicted_bg_without_action: int = 0
+    predicted_bg_with_action: int = 0
+    target_bg: int = 100
+
+    # Context
+    iob: float = 0.0
+    cob: float = 0.0
+    pob: float = 0.0
+    isf: float = 50.0
+
+    # Reasoning
+    action_type: str = "none"  # "insulin", "food", "none"
+    reasoning: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = asdict(self)
+        result['food_suggestions'] = [s.to_dict() for s in self.food_suggestions]
+        return result
 
 
 def _to_utc_naive(dt: datetime) -> datetime:
@@ -227,6 +273,171 @@ class IOBCOBService:
         if self._user_profile:
             return self._user_profile.proteinPeakMin
         return 180.0  # Default
+
+    def get_metabolic_adjusted_params(
+        self,
+        metabolic_state: Optional[str] = None,
+        absorption_state: Optional[str] = None
+    ) -> dict:
+        """
+        Get absorption parameters adjusted for current metabolic state.
+
+        Metabolic state affects insulin KINETICS (how fast it acts):
+        - SICK/RESISTANT: Insulin acts slower (tissue resistance, delayed absorption)
+        - SENSITIVE: Insulin acts faster (improved peripheral uptake)
+
+        Absorption state affects carb KINETICS (how fast carbs absorb):
+        - VERY_SLOW: Gastroparesis, illness - much slower absorption
+        - SLOW: Mild delayed gastric emptying
+        - FAST: Post-exercise, high metabolic rate
+
+        These adjustments are ON TOP of learned baseline parameters.
+
+        Args:
+            metabolic_state: "sick", "resistant", "normal", "sensitive", "very_sensitive"
+            absorption_state: "very_slow", "slow", "normal", "fast", "very_fast"
+
+        Returns:
+            dict with adjusted parameters:
+                - insulin_half_life_min
+                - insulin_onset_min
+                - carb_half_life_min
+                - carb_onset_min
+                - protein_half_life_min
+                - protein_onset_min
+        """
+        # Start with current (possibly learned) parameters
+        adjusted_insulin_half_life = self.insulin_half_life_min
+        adjusted_insulin_onset = self.insulin_onset_min
+        adjusted_carb_half_life = self.carb_half_life_min
+        adjusted_carb_onset = self.carb_onset_min
+        adjusted_protein_half_life = self.protein_half_life_min
+        adjusted_protein_onset = self.protein_onset_min
+
+        # Apply metabolic state adjustments to INSULIN kinetics
+        # Research shows illness/stress increases insulin resistance at tissue level
+        if metabolic_state in ("sick", "resistant"):
+            # Insulin acts slower when sick/resistant
+            # - Delayed absorption from injection site
+            # - Reduced peripheral tissue sensitivity
+            # - Increased counter-regulatory hormones
+            adjustment_factor = 1.2 if metabolic_state == "sick" else 1.15
+            adjusted_insulin_half_life *= adjustment_factor
+            adjusted_insulin_onset *= adjustment_factor
+            logger.info(f"Metabolic state '{metabolic_state}': insulin half-life adjusted to {adjusted_insulin_half_life:.1f}min")
+
+        elif metabolic_state in ("sensitive", "very_sensitive"):
+            # Insulin acts faster when sensitive
+            # - Better tissue uptake
+            # - Lower counter-regulatory hormone levels
+            adjustment_factor = 0.85 if metabolic_state == "very_sensitive" else 0.9
+            adjusted_insulin_half_life *= adjustment_factor
+            adjusted_insulin_onset *= adjustment_factor
+            logger.info(f"Metabolic state '{metabolic_state}': insulin half-life adjusted to {adjusted_insulin_half_life:.1f}min")
+
+        # Apply absorption state adjustments to CARB and PROTEIN kinetics
+        # Gastroparesis, illness, or other factors affect gastric emptying
+        if absorption_state == "very_slow":
+            # Gastroparesis or severe illness - much slower absorption
+            # Can see 50% or more delay in carb absorption
+            carb_adjustment = 1.5
+            protein_adjustment = 1.3  # Protein less affected
+            adjusted_carb_half_life *= carb_adjustment
+            adjusted_carb_onset *= carb_adjustment
+            adjusted_protein_half_life *= protein_adjustment
+            adjusted_protein_onset *= protein_adjustment
+            logger.info(f"Absorption state 'very_slow': carb half-life adjusted to {adjusted_carb_half_life:.1f}min")
+
+        elif absorption_state == "slow":
+            # Mild delayed gastric emptying
+            carb_adjustment = 1.25
+            protein_adjustment = 1.15
+            adjusted_carb_half_life *= carb_adjustment
+            adjusted_carb_onset *= carb_adjustment
+            adjusted_protein_half_life *= protein_adjustment
+            adjusted_protein_onset *= protein_adjustment
+            logger.info(f"Absorption state 'slow': carb half-life adjusted to {adjusted_carb_half_life:.1f}min")
+
+        elif absorption_state == "fast":
+            # Post-exercise or high metabolic rate
+            carb_adjustment = 0.8
+            protein_adjustment = 0.9
+            adjusted_carb_half_life *= carb_adjustment
+            adjusted_carb_onset *= carb_adjustment
+            adjusted_protein_half_life *= protein_adjustment
+            adjusted_protein_onset *= protein_adjustment
+            logger.info(f"Absorption state 'fast': carb half-life adjusted to {adjusted_carb_half_life:.1f}min")
+
+        elif absorption_state == "very_fast":
+            # Liquid carbs, simple sugars
+            carb_adjustment = 0.7
+            protein_adjustment = 0.85
+            adjusted_carb_half_life *= carb_adjustment
+            adjusted_carb_onset *= carb_adjustment
+            adjusted_protein_half_life *= protein_adjustment
+            adjusted_protein_onset *= protein_adjustment
+            logger.info(f"Absorption state 'very_fast': carb half-life adjusted to {adjusted_carb_half_life:.1f}min")
+
+        return {
+            'insulin_half_life_min': adjusted_insulin_half_life,
+            'insulin_onset_min': adjusted_insulin_onset,
+            'carb_half_life_min': adjusted_carb_half_life,
+            'carb_onset_min': adjusted_carb_onset,
+            'protein_half_life_min': adjusted_protein_half_life,
+            'protein_onset_min': adjusted_protein_onset
+        }
+
+    def with_metabolic_state(
+        self,
+        metabolic_state: Optional[str] = None,
+        absorption_state: Optional[str] = None
+    ) -> "IOBCOBService":
+        """
+        Create a copy of this service with metabolic state adjustments applied.
+
+        This is the recommended way to get metabolic-adjusted calculations:
+
+            service = IOBCOBService.from_settings()
+            adjusted_service = service.with_metabolic_state("sick", "slow")
+            iob = adjusted_service.calculate_iob(treatments)
+
+        Args:
+            metabolic_state: Current metabolic state (sick/resistant/normal/sensitive)
+            absorption_state: Current absorption state (very_slow/slow/normal/fast)
+
+        Returns:
+            New IOBCOBService instance with adjusted parameters
+        """
+        if metabolic_state in (None, "normal") and absorption_state in (None, "normal"):
+            return self  # No adjustment needed
+
+        adjusted_params = self.get_metabolic_adjusted_params(metabolic_state, absorption_state)
+
+        # Create a new service with adjusted parameters
+        adjusted_service = IOBCOBService(
+            insulin_duration_min=self.insulin_duration_min,
+            insulin_half_life_min=adjusted_params['insulin_half_life_min'],
+            insulin_onset_min=adjusted_params['insulin_onset_min'],
+            insulin_ramp_min=self.insulin_ramp_min,
+            carb_duration_min=self.carb_duration_min,
+            carb_half_life_min=adjusted_params['carb_half_life_min'],
+            carb_onset_min=adjusted_params['carb_onset_min'],
+            carb_ramp_min=self.carb_ramp_min,
+            carb_bg_factor=self.carb_bg_factor,
+            protein_duration_min=self.protein_duration_min,
+            protein_half_life_min=adjusted_params['protein_half_life_min'],
+            protein_onset_min=adjusted_params['protein_onset_min'],
+            protein_ramp_min=self.protein_ramp_min,
+            protein_bg_factor=self.protein_bg_factor,
+            target_bg=self.target_bg
+        )
+
+        # Copy user profile if present
+        if self._user_profile:
+            adjusted_service._user_profile = self._user_profile
+            adjusted_service._user_id = self._user_id
+
+        return adjusted_service
 
     @classmethod
     async def for_user(cls, user_id: str) -> "IOBCOBService":
@@ -526,67 +737,584 @@ class IOBCOBService:
         pir: float = None
     ) -> Tuple[float, int]:
         """
-        Calculate recommended correction dose.
+        Calculate recommended correction dose using CONVERGENT PREDICTIVE math.
 
-        This uses the EFFECTIVE BG which accounts for:
-        - IOB: insulin that will LOWER BG
-        - COB: carbs that will RAISE BG
-        - POB: protein that will RAISE BG (slower than carbs)
+        GOAL: Find the exact dose that lands BG at TARGET (100) after all factors play out.
 
-        Formula:
-            effective_bg = current_bg + cob_effect + pob_effect - iob_effect
-            dose = (effective_bg - target_bg) / isf
+        This solves the equation:
+            BG_final = current_bg + COB_effect + POB_effect - IOB_effect - NewDose_effect = TARGET
 
-        This answers: "Where is my BG heading, and how much insulin do I need
-        to steer it to target?"
+        Solving for NewDose:
+            NewDose = (current_bg + COB_effect + POB_effect - IOB_effect - TARGET) / (ISF * absorption_fraction)
 
-        Note: Including COB/POB is correct because:
-        - Fresh IOB may cover fresh COB/POB (net effect near zero)
-        - As time passes, IOB depletes faster than food (esp. protein)
-        - When IOB can't cover remaining food, you need more insulin
+        We use TARGET_TIME = 180 min (3 hours) as the convergence point where:
+        - Most insulin will have acted (~95%)
+        - Most carbs will have absorbed (~95%)
+        - Protein effect will be well underway (~60%)
+
+        SAFETY RULES:
+        - If current BG < target: NEVER recommend insulin
+        - If predicted BG at target time <= target: No dose needed
+        - Cap at absolute maximum for safety
 
         Args:
             current_bg: Current blood glucose in mg/dL
-            iob: Current Insulin on Board
-            cob: Current Carbs on Board
+            iob: Current Insulin on Board (units)
+            cob: Current Carbs on Board (grams)
             isf: Insulin Sensitivity Factor (mg/dL per unit)
-            pob: Current Protein on Board
-            pir: Protein to Insulin Ratio (grams per unit), unused
+            pob: Current Protein on Board (grams)
+            pir: Protein to Insulin Ratio (unused, kept for API compatibility)
 
         Returns:
-            Tuple of (recommended_dose, effective_bg)
+            Tuple of (recommended_dose, predicted_bg_at_target_time)
         """
         if isf <= 0:
             logger.warning("ISF must be positive for dose calculation")
             return 0.0, current_bg
 
-        # Calculate individual effects
-        cob_effect = cob * self.carb_bg_factor  # Expected BG rise from remaining carbs
-        pob_effect = pob * self.protein_bg_factor  # Expected BG rise from remaining protein
-        iob_effect = iob * isf  # Expected BG drop from remaining insulin
+        # SAFETY RULE 1: If BG is already below target, NEVER recommend insulin
+        if current_bg < self.target_bg:
+            predicted_bg = self._predict_bg_at_time(
+                current_bg, iob, cob, pob, isf, 0.0, target_time_min=180
+            )
+            logger.info(
+                f"Dose calc: BG={current_bg} is BELOW target {self.target_bg}. "
+                f"No insulin recommended. Predicted BG at 3hr: {predicted_bg:.0f}"
+            )
+            return 0.0, int(round(predicted_bg))
 
-        # Effective BG: where BG is heading considering ALL active factors
-        effective_bg = current_bg + cob_effect + pob_effect - iob_effect
-        effective_bg_display = int(round(effective_bg))
+        # TARGET TIME: 180 minutes (3 hours)
+        # This is when we want BG to be at target - enough time for:
+        # - Insulin to be ~95% absorbed
+        # - Carbs to be ~95% absorbed
+        # - Protein to have significant effect (~60%)
+        TARGET_TIME_MIN = 180.0
 
-        # Calculate correction dose based on effective BG
-        correction_needed = effective_bg - self.target_bg
-
-        if correction_needed <= 0:
-            # BG trajectory is at or below target, no correction needed
-            return 0.0, effective_bg_display
-
-        dose = correction_needed / isf
-        dose = round(max(0, dose), 2)
-
-        logger.debug(
-            f"Dose calc: BG={current_bg}, COB={cob}g, POB={pob}g, "
-            f"IOB={iob:.2f}U (-{iob_effect:.0f}), "
-            f"Effective BG={effective_bg:.0f}, Target={self.target_bg}, "
-            f"Correction={dose}U"
+        # Step 1: Predict BG at target time WITHOUT any new dose
+        predicted_bg_no_dose = self._predict_bg_at_time(
+            current_bg, iob, cob, pob, isf, new_dose=0.0, target_time_min=TARGET_TIME_MIN
         )
 
-        return dose, effective_bg_display
+        # Step 2: If predicted BG is already at or below target, no dose needed
+        if predicted_bg_no_dose <= self.target_bg:
+            logger.info(
+                f"Dose calc: Predicted BG at {TARGET_TIME_MIN:.0f}min ({predicted_bg_no_dose:.0f}) <= "
+                f"target ({self.target_bg}). No correction needed."
+            )
+            return 0.0, int(round(predicted_bg_no_dose))
+
+        # Step 3: Calculate the exact dose to converge on target
+        # Use iterative refinement for precision
+        dose = self._solve_dose_for_target(
+            current_bg, iob, cob, pob, isf,
+            target_bg=self.target_bg,
+            target_time_min=TARGET_TIME_MIN
+        )
+
+        # Step 4: Verify the dose lands at target (sanity check)
+        predicted_bg_with_dose = self._predict_bg_at_time(
+            current_bg, iob, cob, pob, isf, new_dose=dose, target_time_min=TARGET_TIME_MIN
+        )
+
+        # SAFETY: Cap at absolute maximum
+        ABSOLUTE_MAX_DOSE = 5.0
+        if dose > ABSOLUTE_MAX_DOSE:
+            logger.warning(f"Dose capped from {dose:.2f}U to {ABSOLUTE_MAX_DOSE}U for safety")
+            dose = ABSOLUTE_MAX_DOSE
+            # Recalculate predicted BG with capped dose
+            predicted_bg_with_dose = self._predict_bg_at_time(
+                current_bg, iob, cob, pob, isf, new_dose=dose, target_time_min=TARGET_TIME_MIN
+            )
+
+        dose = round(max(0, dose), 2)
+
+        logger.info(
+            f"CONVERGENT DOSE CALC: BG={current_bg}, Target={self.target_bg}, "
+            f"IOB={iob:.2f}U, COB={cob:.0f}g, POB={pob:.0f}g, ISF={isf:.0f}\n"
+            f"  Without dose: BG at {TARGET_TIME_MIN:.0f}min = {predicted_bg_no_dose:.0f}\n"
+            f"  With {dose:.2f}U: BG at {TARGET_TIME_MIN:.0f}min = {predicted_bg_with_dose:.0f} (target: {self.target_bg})"
+        )
+
+        return dose, int(round(predicted_bg_with_dose))
+
+    def _predict_bg_at_time(
+        self,
+        current_bg: float,
+        iob: float,
+        cob: float,
+        pob: float,
+        isf: float,
+        new_dose: float,
+        target_time_min: float
+    ) -> float:
+        """
+        Predict BG at a specific future time considering all metabolic factors.
+
+        Uses exponential decay models for absorption:
+        - Insulin: half-life based decay (faster for children)
+        - Carbs: half-life based decay (varies by GI)
+        - Protein: delayed onset (2hr) then decay
+        - New dose: same kinetics as IOB but starts from 0 absorption
+
+        Args:
+            current_bg: Current blood glucose
+            iob: Current IOB (units)
+            cob: Current COB (grams)
+            pob: Current POB (grams)
+            isf: Insulin sensitivity factor
+            new_dose: New insulin dose being considered (units)
+            target_time_min: Time in future to predict (minutes)
+
+        Returns:
+            Predicted BG at target_time_min
+        """
+        # IOB effect: How much existing IOB will lower BG by target time
+        # fraction_acted = 1 - 0.5^(time/half_life)
+        iob_fraction_acted = 1.0 - (0.5 ** (target_time_min / self.insulin_half_life_min))
+        iob_effect = iob * isf * iob_fraction_acted
+
+        # NEW DOSE effect: How much new dose will lower BG by target time
+        # New dose has onset delay (~15 min) before it starts acting
+        INSULIN_ONSET_MIN = 15.0
+        effective_time_for_new_dose = max(0, target_time_min - INSULIN_ONSET_MIN)
+        new_dose_fraction_acted = 1.0 - (0.5 ** (effective_time_for_new_dose / self.insulin_half_life_min))
+        new_dose_effect = new_dose * isf * new_dose_fraction_acted
+
+        # COB effect: How much carbs will raise BG by target time
+        cob_fraction_absorbed = 1.0 - (0.5 ** (target_time_min / self.carb_half_life_min))
+        cob_effect = cob * self.carb_bg_factor * cob_fraction_absorbed
+
+        # POB effect: Protein has delayed onset (~120 min) then acts
+        PROTEIN_ONSET_MIN = 120.0
+        PROTEIN_HALF_LIFE_MIN = 90.0  # Slower than carbs
+        effective_time_for_protein = max(0, target_time_min - PROTEIN_ONSET_MIN)
+        pob_fraction_effective = 1.0 - (0.5 ** (effective_time_for_protein / PROTEIN_HALF_LIFE_MIN))
+        # Protein only converts ~50% to glucose equivalent
+        pob_effect = pob * self.protein_bg_factor * pob_fraction_effective * 0.5
+
+        # Final predicted BG
+        predicted_bg = current_bg + cob_effect + pob_effect - iob_effect - new_dose_effect
+
+        # Clamp to physiological range
+        predicted_bg = max(40, min(400, predicted_bg))
+
+        return predicted_bg
+
+    def _solve_dose_for_target(
+        self,
+        current_bg: float,
+        iob: float,
+        cob: float,
+        pob: float,
+        isf: float,
+        target_bg: float,
+        target_time_min: float,
+        tolerance: float = 1.0,
+        max_iterations: int = 20
+    ) -> float:
+        """
+        Solve for the exact dose that lands BG at target using Newton-Raphson iteration.
+
+        The equation to solve:
+            predicted_bg(dose) = target_bg
+
+        We use iterative refinement because the relationship between dose and BG
+        is well-behaved (monotonically decreasing).
+
+        Args:
+            current_bg: Current blood glucose
+            iob, cob, pob: Current on-board values
+            isf: Insulin sensitivity factor
+            target_bg: Desired final BG (typically 100)
+            target_time_min: Time horizon for convergence
+            tolerance: Acceptable error in mg/dL
+            max_iterations: Maximum refinement iterations
+
+        Returns:
+            Dose (in units) that achieves target BG
+        """
+        # Calculate BG effect per unit of insulin at target time
+        # This is the "derivative" for Newton-Raphson
+        INSULIN_ONSET_MIN = 15.0
+        effective_time = max(0, target_time_min - INSULIN_ONSET_MIN)
+        dose_fraction_acted = 1.0 - (0.5 ** (effective_time / self.insulin_half_life_min))
+        bg_drop_per_unit = isf * dose_fraction_acted
+
+        if bg_drop_per_unit <= 0:
+            logger.warning("Cannot calculate dose: insulin has no effect at target time")
+            return 0.0
+
+        # Initial guess: simple linear calculation
+        predicted_no_dose = self._predict_bg_at_time(
+            current_bg, iob, cob, pob, isf, new_dose=0.0, target_time_min=target_time_min
+        )
+
+        if predicted_no_dose <= target_bg:
+            return 0.0  # Already at or below target
+
+        # Initial dose estimate
+        dose = (predicted_no_dose - target_bg) / bg_drop_per_unit
+
+        # Iterative refinement (Newton-Raphson)
+        for iteration in range(max_iterations):
+            predicted_bg = self._predict_bg_at_time(
+                current_bg, iob, cob, pob, isf, new_dose=dose, target_time_min=target_time_min
+            )
+
+            error = predicted_bg - target_bg
+
+            if abs(error) <= tolerance:
+                logger.debug(f"Dose convergence in {iteration + 1} iterations: {dose:.3f}U -> BG {predicted_bg:.1f}")
+                break
+
+            # Adjust dose: if predicted is too high, increase dose
+            dose_adjustment = error / bg_drop_per_unit
+            dose = dose + dose_adjustment
+
+            # Ensure dose stays non-negative
+            dose = max(0, dose)
+
+        return dose
+
+    def _predict_bg_with_new_carbs(
+        self,
+        current_bg: float,
+        iob: float,
+        cob: float,
+        pob: float,
+        isf: float,
+        new_carbs: float,
+        target_time_min: float
+    ) -> float:
+        """
+        Predict BG at target time WITH additional carbs eaten now.
+
+        New carbs are added to existing COB and both absorb together.
+
+        Args:
+            current_bg: Current blood glucose
+            iob: Current IOB (units)
+            cob: Current COB (grams)
+            pob: Current POB (grams)
+            isf: Insulin sensitivity factor
+            new_carbs: New carbs being eaten (grams)
+            target_time_min: Time in future to predict (minutes)
+
+        Returns:
+            Predicted BG at target_time_min
+        """
+        # IOB effect (unchanged)
+        iob_fraction_acted = 1.0 - (0.5 ** (target_time_min / self.insulin_half_life_min))
+        iob_effect = iob * isf * iob_fraction_acted
+
+        # Total carb effect: existing COB + new carbs
+        # New carbs have slight delay (~10 min) before absorption starts
+        CARB_ONSET_MIN = 10.0
+        effective_time_for_new_carbs = max(0, target_time_min - CARB_ONSET_MIN)
+
+        # Existing COB fraction absorbed
+        cob_fraction = 1.0 - (0.5 ** (target_time_min / self.carb_half_life_min))
+        cob_effect = cob * self.carb_bg_factor * cob_fraction
+
+        # New carbs fraction absorbed (with onset delay)
+        new_carb_fraction = 1.0 - (0.5 ** (effective_time_for_new_carbs / self.carb_half_life_min))
+        new_carb_effect = new_carbs * self.carb_bg_factor * new_carb_fraction
+
+        # POB effect (unchanged)
+        PROTEIN_ONSET_MIN = 120.0
+        PROTEIN_HALF_LIFE_MIN = 90.0
+        effective_time_for_protein = max(0, target_time_min - PROTEIN_ONSET_MIN)
+        pob_fraction = 1.0 - (0.5 ** (effective_time_for_protein / PROTEIN_HALF_LIFE_MIN))
+        pob_effect = pob * self.protein_bg_factor * pob_fraction * 0.5
+
+        # Final predicted BG
+        predicted_bg = current_bg + cob_effect + new_carb_effect + pob_effect - iob_effect
+
+        return max(40, min(400, predicted_bg))
+
+    def _solve_carbs_for_target(
+        self,
+        current_bg: float,
+        iob: float,
+        cob: float,
+        pob: float,
+        isf: float,
+        target_bg: float,
+        target_time_min: float,
+        tolerance: float = 1.0,
+        max_iterations: int = 20
+    ) -> float:
+        """
+        Solve for the exact carbs needed to raise BG to target.
+
+        Uses Newton-Raphson iteration, similar to dose calculation but inverted.
+
+        Args:
+            current_bg: Current blood glucose
+            iob, cob, pob: Current on-board values
+            isf: Insulin sensitivity factor
+            target_bg: Desired final BG (typically 100)
+            target_time_min: Time horizon for convergence
+            tolerance: Acceptable error in mg/dL
+            max_iterations: Maximum refinement iterations
+
+        Returns:
+            Carbs (in grams) that achieves target BG
+        """
+        # Calculate BG rise per gram of carbs at target time
+        CARB_ONSET_MIN = 10.0
+        effective_time = max(0, target_time_min - CARB_ONSET_MIN)
+        carb_fraction = 1.0 - (0.5 ** (effective_time / self.carb_half_life_min))
+        bg_rise_per_gram = self.carb_bg_factor * carb_fraction
+
+        if bg_rise_per_gram <= 0:
+            logger.warning("Cannot calculate carbs: no effect at target time")
+            return 0.0
+
+        # Predict BG without new carbs
+        predicted_no_carbs = self._predict_bg_with_new_carbs(
+            current_bg, iob, cob, pob, isf, new_carbs=0.0, target_time_min=target_time_min
+        )
+
+        if predicted_no_carbs >= target_bg:
+            return 0.0  # Already at or above target
+
+        # How much BG needs to rise
+        bg_deficit = target_bg - predicted_no_carbs
+
+        # Initial carbs estimate
+        carbs = bg_deficit / bg_rise_per_gram
+
+        # Iterative refinement
+        for iteration in range(max_iterations):
+            predicted_bg = self._predict_bg_with_new_carbs(
+                current_bg, iob, cob, pob, isf, new_carbs=carbs, target_time_min=target_time_min
+            )
+
+            error = target_bg - predicted_bg  # Positive if still below target
+
+            if abs(error) <= tolerance:
+                logger.debug(f"Carbs convergence in {iteration + 1} iterations: {carbs:.1f}g -> BG {predicted_bg:.1f}")
+                break
+
+            # Adjust carbs: if predicted is too low, add more carbs
+            carbs_adjustment = error / bg_rise_per_gram
+            carbs = carbs + carbs_adjustment
+
+            # Ensure carbs stays non-negative
+            carbs = max(0, carbs)
+
+        return carbs
+
+    def get_food_suggestions_from_history(
+        self,
+        treatments: List[Treatment],
+        target_carbs: float,
+        tolerance_grams: float = 10.0
+    ) -> List[FoodSuggestion]:
+        """
+        Find foods from user's history that match the target carb amount.
+
+        Args:
+            treatments: User's historical treatments
+            target_carbs: Target carbs needed (grams)
+            tolerance_grams: How close to target the food should be
+
+        Returns:
+            List of FoodSuggestion sorted by relevance
+        """
+        # Count food occurrences and collect details
+        food_counts: Dict[str, Dict[str, Any]] = {}
+
+        for t in treatments:
+            # Only look at carb treatments with notes (food descriptions)
+            if t.carbs and t.carbs > 0 and t.notes:
+                food_name = t.notes.strip().lower()
+                if not food_name:
+                    continue
+
+                if food_name not in food_counts:
+                    food_counts[food_name] = {
+                        'name': t.notes.strip(),  # Keep original case
+                        'carbs_list': [],
+                        'gi_list': [],
+                        'count': 0
+                    }
+
+                food_counts[food_name]['carbs_list'].append(t.carbs)
+                food_counts[food_name]['count'] += 1
+                if t.glycemicIndex:
+                    food_counts[food_name]['gi_list'].append(t.glycemicIndex)
+
+        # Score and filter foods
+        suggestions = []
+        for food_key, data in food_counts.items():
+            avg_carbs = sum(data['carbs_list']) / len(data['carbs_list'])
+            avg_gi = int(sum(data['gi_list']) / len(data['gi_list'])) if data['gi_list'] else None
+
+            # Calculate how well this food matches target
+            carb_diff = abs(avg_carbs - target_carbs)
+
+            # Score: prefer foods eaten frequently and close to target carbs
+            # Allow foods within 2x of target (can eat half or double portion)
+            if avg_carbs > 0 and (avg_carbs <= target_carbs * 2.5 or carb_diff <= tolerance_grams * 2):
+                # Calculate portion to match target
+                portion_multiplier = target_carbs / avg_carbs if avg_carbs > 0 else 1
+
+                # Create portion description
+                if 0.9 <= portion_multiplier <= 1.1:
+                    portion = "1 serving"
+                elif portion_multiplier < 0.9:
+                    portion = f"{portion_multiplier:.1f}x serving (~{target_carbs:.0f}g carbs)"
+                else:
+                    portion = f"{portion_multiplier:.1f}x serving (~{target_carbs:.0f}g carbs)"
+
+                suggestion = FoodSuggestion(
+                    name=data['name'],
+                    carbs=round(avg_carbs, 0),
+                    typical_portion=portion,
+                    glycemic_index=avg_gi,
+                    times_eaten=data['count']
+                )
+                suggestions.append((carb_diff, -data['count'], suggestion))  # Sort by carb_diff asc, count desc
+
+        # Sort by closest to target carbs, then by frequency
+        suggestions.sort(key=lambda x: (x[0], x[1]))
+
+        # Return top 5 suggestions
+        return [s[2] for s in suggestions[:5]]
+
+    def calculate_full_recommendation(
+        self,
+        current_bg: int,
+        iob: float,
+        cob: float,
+        isf: float,
+        pob: float = 0.0,
+        user_treatments: Optional[List[Treatment]] = None
+    ) -> DoseRecommendation:
+        """
+        Calculate complete recommendation: dose AND/OR food to reach target 100.
+
+        This method:
+        1. Predicts BG at 3 hours without any action
+        2. If BG will be HIGH: recommends insulin dose
+        3. If BG will be LOW: recommends carbs and suggests foods from user's history
+
+        Args:
+            current_bg: Current blood glucose in mg/dL
+            iob: Current Insulin on Board (units)
+            cob: Current Carbs on Board (grams)
+            isf: Insulin Sensitivity Factor (mg/dL per unit)
+            pob: Current Protein on Board (grams)
+            user_treatments: User's historical treatments for food suggestions
+
+        Returns:
+            DoseRecommendation with complete advice
+        """
+        TARGET_TIME_MIN = 180.0
+        user_treatments = user_treatments or []
+
+        # Predict BG at target time without any action
+        predicted_bg_no_action = self._predict_bg_at_time(
+            current_bg, iob, cob, pob, isf, new_dose=0.0, target_time_min=TARGET_TIME_MIN
+        )
+
+        recommendation = DoseRecommendation(
+            current_bg=current_bg,
+            predicted_bg_without_action=int(round(predicted_bg_no_action)),
+            target_bg=self.target_bg,
+            iob=iob,
+            cob=cob,
+            pob=pob,
+            isf=isf
+        )
+
+        # Case 1: BG predicted to be at target (within ±5)
+        if abs(predicted_bg_no_action - self.target_bg) <= 5:
+            recommendation.action_type = "none"
+            recommendation.predicted_bg_with_action = int(round(predicted_bg_no_action))
+            recommendation.reasoning = f"BG predicted to be {predicted_bg_no_action:.0f} at 3hr, already at target."
+            return recommendation
+
+        # Case 2: BG predicted HIGH -> recommend insulin
+        if predicted_bg_no_action > self.target_bg:
+            # Don't recommend insulin if current BG is already low
+            if current_bg < self.target_bg:
+                recommendation.action_type = "none"
+                recommendation.predicted_bg_with_action = int(round(predicted_bg_no_action))
+                recommendation.reasoning = (
+                    f"Current BG ({current_bg}) is below target. "
+                    f"Predicted to rise to {predicted_bg_no_action:.0f} from COB/POB. "
+                    f"No insulin - let carbs work."
+                )
+                return recommendation
+
+            dose = self._solve_dose_for_target(
+                current_bg, iob, cob, pob, isf,
+                target_bg=self.target_bg,
+                target_time_min=TARGET_TIME_MIN
+            )
+
+            # Cap dose
+            ABSOLUTE_MAX_DOSE = 5.0
+            if dose > ABSOLUTE_MAX_DOSE:
+                dose = ABSOLUTE_MAX_DOSE
+
+            predicted_with_dose = self._predict_bg_at_time(
+                current_bg, iob, cob, pob, isf, new_dose=dose, target_time_min=TARGET_TIME_MIN
+            )
+
+            recommendation.recommended_dose = round(max(0, dose), 2)
+            recommendation.action_type = "insulin"
+            recommendation.predicted_bg_with_action = int(round(predicted_with_dose))
+            recommendation.reasoning = (
+                f"BG predicted {predicted_bg_no_action:.0f} at 3hr. "
+                f"{dose:.2f}U insulin will bring it to ~{self.target_bg}."
+            )
+
+            logger.info(
+                f"DOSE RECOMMENDATION: BG={current_bg}, Predicted={predicted_bg_no_action:.0f}, "
+                f"Dose={dose:.2f}U -> Final={predicted_with_dose:.0f}"
+            )
+            return recommendation
+
+        # Case 3: BG predicted LOW -> recommend food
+        carbs_needed = self._solve_carbs_for_target(
+            current_bg, iob, cob, pob, isf,
+            target_bg=self.target_bg,
+            target_time_min=TARGET_TIME_MIN
+        )
+
+        # Round to nearest 5g for practical eating
+        carbs_needed = round(carbs_needed / 5) * 5
+        carbs_needed = max(5, carbs_needed)  # At least 5g
+
+        predicted_with_food = self._predict_bg_with_new_carbs(
+            current_bg, iob, cob, pob, isf, new_carbs=carbs_needed, target_time_min=TARGET_TIME_MIN
+        )
+
+        # Get food suggestions from user's history
+        food_suggestions = self.get_food_suggestions_from_history(
+            user_treatments, target_carbs=carbs_needed
+        )
+
+        recommendation.recommended_carbs = carbs_needed
+        recommendation.food_suggestions = food_suggestions
+        recommendation.action_type = "food"
+        recommendation.predicted_bg_with_action = int(round(predicted_with_food))
+        recommendation.reasoning = (
+            f"BG predicted {predicted_bg_no_action:.0f} at 3hr (below target). "
+            f"Eat ~{carbs_needed:.0f}g carbs to reach ~{self.target_bg}."
+        )
+
+        logger.info(
+            f"FOOD RECOMMENDATION: BG={current_bg}, Predicted={predicted_bg_no_action:.0f}, "
+            f"Carbs needed={carbs_needed:.0f}g -> Final={predicted_with_food:.0f}, "
+            f"Suggestions: {[f.name for f in food_suggestions[:3]]}"
+        )
+
+        return recommendation
 
     def get_current_metrics(
         self,
@@ -610,7 +1338,18 @@ class IOBCOBService:
         iob = self.calculate_iob(treatments)
         cob = self.calculate_cob(treatments)
         pob = self.calculate_pob(treatments)
-        dose, effective_bg = self.calculate_dose_recommendation(current_bg, iob, cob, isf, pob)
+
+        # Get full recommendation (dose + food)
+        full_rec = self.calculate_full_recommendation(
+            current_bg=current_bg,
+            iob=iob,
+            cob=cob,
+            isf=isf,
+            pob=pob,
+            user_treatments=treatments  # Pass treatments for food history
+        )
+        dose = full_rec.recommended_dose
+        effective_bg = full_rec.predicted_bg_with_action
 
         # Calculate protein dose based on insulin-protein timing overlap
         # NOW = portion of protein BG effect that overlaps with insulin action window
@@ -699,6 +1438,19 @@ class IOBCOBService:
                 protein_dose_later += protein_dose_now
                 protein_dose_now = 0.0
 
+        # Convert FoodSuggestion dataclasses to dicts for Pydantic
+        from models.schemas import FoodSuggestionSchema
+        food_suggestions_schema = [
+            FoodSuggestionSchema(
+                name=f.name,
+                carbs=f.carbs,
+                typical_portion=f.typical_portion,
+                glycemic_index=f.glycemic_index,
+                times_eaten=f.times_eaten
+            )
+            for f in full_rec.food_suggestions
+        ]
+
         return CurrentMetrics(
             iob=iob,
             cob=cob,
@@ -707,7 +1459,14 @@ class IOBCOBService:
             recommendedDose=dose,
             effectiveBg=effective_bg,
             proteinDoseNow=round(protein_dose_now, 2),
-            proteinDoseLater=round(protein_dose_later, 2)
+            proteinDoseLater=round(protein_dose_later, 2),
+            # Food recommendation fields
+            actionType=full_rec.action_type,
+            recommendedCarbs=full_rec.recommended_carbs,
+            foodSuggestions=food_suggestions_schema,
+            predictedBgWithoutAction=full_rec.predicted_bg_without_action,
+            predictedBgWithAction=full_rec.predicted_bg_with_action,
+            recommendationReasoning=full_rec.reasoning
         )
 
 

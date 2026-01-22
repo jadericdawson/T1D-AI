@@ -3,7 +3,7 @@
  * Displays IOB, COB, ISF, and Dose metrics
  */
 import { motion } from 'framer-motion'
-import { Droplet, Pill, Brain, TrendingUp, Activity, AlertTriangle, Beef } from 'lucide-react'
+import { Droplet, Pill, Brain, TrendingUp, Activity, AlertTriangle, Beef, Utensils } from 'lucide-react'
 import { cn, formatDecimal } from '@/lib/utils'
 import {
   Tooltip,
@@ -213,15 +213,18 @@ export function ISFGaugeCard({
 
   const sourceLabel = source === 'learned' ? '🤖' : source === 'manual' ? '✏️' : ''
 
-  if (isLoading) {
+  // Show dash when loading OR when no learned data (source is 'default')
+  const showDash = isLoading || source === 'default'
+
+  if (showDash) {
     return (
       <MetricCard
         icon={<Brain className="w-5 h-5" />}
         label="ISF"
         value="—"
         color="text-purple-500"
-        tooltip="Loading..."
-        isLoading={true}
+        tooltip={isLoading ? "Loading..." : "No learned ISF yet - needs more data"}
+        isLoading={isLoading}
       />
     )
   }
@@ -417,6 +420,143 @@ export function DoseCard({
   )
 }
 
+// Food Suggestion interface
+export interface FoodSuggestion {
+  name: string
+  carbs: number
+  typical_portion: string
+  glycemic_index?: number | null
+  times_eaten: number
+}
+
+// Unified Recommendation Card - Shows either insulin dose OR food recommendation
+export function RecommendationCard({
+  actionType,
+  recommendedDose,
+  recommendedCarbs,
+  foodSuggestions,
+  predictedBgWithAction,
+  reasoning,
+  proteinDoseNow,
+  onClick,
+  isLoading,
+}: {
+  actionType: 'insulin' | 'food' | 'none'
+  recommendedDose: number
+  recommendedCarbs: number
+  foodSuggestions: FoodSuggestion[]
+  predictedBgWithoutAction?: number  // Optional - kept for future use
+  predictedBgWithAction: number
+  reasoning: string
+  proteinDoseNow?: number
+  proteinDoseLater?: number  // Optional - kept for future use
+  onClick?: () => void
+  isLoading?: boolean
+}) {
+  if (isLoading) {
+    return (
+      <MetricCard
+        icon={<TrendingUp className="w-5 h-5" />}
+        label="Action"
+        value="—"
+        color="text-cyan"
+        isLoading={true}
+      />
+    )
+  }
+
+  // Case 1: No action needed
+  if (actionType === 'none') {
+    return (
+      <MetricCard
+        icon={<TrendingUp className="w-5 h-5" />}
+        label="Action"
+        value="✓"
+        unit=""
+        color="text-green-500"
+        tooltip={reasoning || `BG predicted ${predictedBgWithAction} - no action needed`}
+        subValue="On target"
+      />
+    )
+  }
+
+  // Case 2: Insulin dose recommended
+  if (actionType === 'insulin') {
+    const totalDoseNow = recommendedDose + (proteinDoseNow ?? 0)
+    let subText = `to 100`
+    if (proteinDoseNow && proteinDoseNow > 0) {
+      subText += ` (+${formatDecimal(proteinDoseNow, 1)}U P)`
+    }
+
+    return (
+      <MetricCard
+        icon={<TrendingUp className="w-5 h-5" />}
+        label="Dose"
+        value={formatDecimal(totalDoseNow, 2)}
+        unit="U"
+        color="text-cyan"
+        highlighted={totalDoseNow > 0}
+        tooltip={reasoning || `${recommendedDose.toFixed(2)}U insulin to reach target 100`}
+        subValue={subText}
+        onClick={onClick}
+      />
+    )
+  }
+
+  // Case 3: Food recommended (BG predicted low)
+  const topFood = foodSuggestions[0]
+  const subText = topFood
+    ? `Try: ${topFood.name}`
+    : `~${recommendedCarbs}g needed`
+
+  return (
+    <motion.div
+      initial="hidden"
+      animate="visible"
+      variants={{
+        hidden: { opacity: 0, y: 10 },
+        visible: { opacity: 1, y: 0, transition: { duration: 0.3 } },
+      }}
+      whileHover={{ scale: 1.02 }}
+      onClick={onClick}
+      className={cn(
+        'glass-card text-center py-4 cursor-pointer border-yellow-500/50 animate-pulse-glow',
+        onClick && 'hover:border-yellow-400/50'
+      )}
+    >
+      <div className="mx-auto mb-2 text-yellow-500">
+        <Utensils className="w-5 h-5 mx-auto" />
+      </div>
+      <div className="flex items-baseline justify-center gap-1">
+        <span className="text-2xl font-orbitron font-bold text-yellow-500">
+          {formatDecimal(recommendedCarbs, 0)}
+        </span>
+        <span className="text-gray-500 text-sm">g carbs</span>
+      </div>
+      <p className="text-gray-500 text-xs uppercase tracking-wider mt-1">
+        Eat Food
+      </p>
+      <p className="text-yellow-400 text-xs mt-1 truncate px-2">
+        {subText}
+      </p>
+      {/* Food suggestions dropdown */}
+      {foodSuggestions.length > 0 && (
+        <div className="mt-2 px-2 text-left">
+          <div className="text-xs text-gray-500 mb-1">Your foods:</div>
+          <div className="space-y-1">
+            {foodSuggestions.slice(0, 3).map((food, idx) => (
+              <div key={idx} className="text-xs flex justify-between text-gray-400">
+                <span className="truncate">{food.name}</span>
+                <span className="text-yellow-400 ml-1">{food.carbs}g</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </motion.div>
+  )
+}
+
 // ICR Card - Carb-to-Insulin Ratio (simple version)
 export function ICRCard({
   value,
@@ -485,15 +625,18 @@ export function ICRGaugeCard({
 
   const sourceLabel = source === 'learned' ? '🤖' : source === 'manual' ? '✏️' : ''
 
-  if (isLoading) {
+  // Show dash when loading OR when no learned data (source is 'default')
+  const showDash = isLoading || source === 'default'
+
+  if (showDash) {
     return (
       <MetricCard
         icon={<Pill className="w-5 h-5" />}
         label="ICR"
         value="—"
         color="text-green-500"
-        tooltip="Loading..."
-        isLoading={true}
+        tooltip={isLoading ? "Loading..." : "No learned ICR yet - needs more data"}
+        isLoading={isLoading}
       />
     )
   }
@@ -688,15 +831,18 @@ export function PIRGaugeCard({
   const sourceLabel = source === 'learned' ? '🤖' : source === 'manual' ? '✏️' : ''
   const timingText = onsetMin && peakMin ? `${onsetMin}-${peakMin}min` : undefined
 
-  if (isLoading) {
+  // Show dash when loading OR when no learned data (source is 'default')
+  const showDash = isLoading || source === 'default'
+
+  if (showDash) {
     return (
       <MetricCard
         icon={<Activity className="w-5 h-5" />}
         label="PIR"
         value="—"
         color="text-orange-500"
-        tooltip="Loading..."
-        isLoading={true}
+        tooltip={isLoading ? "Loading..." : "No learned PIR yet - needs more data"}
+        isLoading={isLoading}
       />
     )
   }

@@ -1,0 +1,10 @@
+artifact_location: file:///home/jadericdawson/Documents/AI/T1D-AI/backend/mlruns/850582552767667662/models/m-6791c420f4ed4f9f9509cbb892f503b0/artifacts
+creation_timestamp: 1767623441959
+experiment_id: '850582552767667662'
+last_updated_timestamp: 1767623447362
+model_id: m-6791c420f4ed4f9f9509cbb892f503b0
+model_type: null
+name: tft_model
+source_run_id: a70b91cca6df4f8f85984bfa9aceb149
+status: 2
+status_message: null

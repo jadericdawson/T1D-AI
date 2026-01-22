@@ -460,45 +460,43 @@ export function PlotlyGlucoseChart({
     // Section 9 (showIobCobLines) is the single source of truth for IOB/COB decay lines
 
     // 7. BG Pressure gradient area - spans BOTH past and future as ONE CONTINUOUS line
-    // BLUE for normal (pressure below glucose), TAN/ORANGE when pressure is ABOVE glucose (rising BG)
-    // Uses smoothing to soften edges while preserving detail
+    // DUAL-COLOR system:
+    // - BLUE when pressure is BELOW BG (insulin winning, pulling BG down)
+    // - TAN/ORANGE when pressure is ABOVE BG (carbs/protein winning, pushing BG up)
+    // This gives immediate visual feedback on metabolic forces direction
     // CRITICAL: Future BG Pressure CONTINUES from past BG Pressure (same accumulation)
     if (showEffectiveBg) {
-      // Color constants - use subtle cyan gradient for all BG Pressure shading
-      // Single color looks cleaner than trying to switch between colors
-      const PRESSURE_FILL = 'rgba(34, 211, 238, 0.15)'  // Subtle cyan to match the app theme
+      // Color constants - dual-color system for metabolic force direction
+      const INSULIN_DOMINANT_FILL = 'rgba(59, 130, 246, 0.18)'   // Soft blue when insulin pulling down
+      const CARB_DOMINANT_FILL = 'rgba(251, 191, 36, 0.22)'      // Warm amber when carbs/protein pushing up
 
       // Get the last past BG Pressure to continue from
       let lastPastBgPressure = lastGlucose  // Default to current BG
 
       // === PAST GRADIENT (historical) ===
       // BG Pressure comes from backend via historicalIobCobData.bgPressure
+      // DUAL-COLOR: Blue when pressure < BG (insulin dominant), Amber when pressure > BG (carbs dominant)
       // CRITICAL: Use glucoseData (visible BG line) for the BG side of shading
-      // This ensures the shading aligns EXACTLY with the visible BG line
       const pastTimestamps: Date[] = []
       const pastGlucose: number[] = []
       const pastPressure: number[] = []
 
       if (historicalIobCobData.timestamps.length > 0 && historicalIobCobData.bgPressure.length > 0) {
         // Create a lookup map from timestamp to bgPressure
-        // Use a 5-minute tolerance for timestamp matching (CGM readings are every 5 min)
         const pressureMap = new Map<number, number>()
         historicalIobCobData.timestamps.forEach((ts, i) => {
           const bgPressure = historicalIobCobData.bgPressure[i]
           if (Number.isFinite(bgPressure)) {
-            // Round to nearest minute for matching
             pressureMap.set(Math.round(ts.getTime() / 60000), bgPressure)
           }
         })
 
-        // Use glucoseData (the visible BG line) as the source of truth
-        // Match each glucose point to its corresponding pressure value
+        // Match glucose points to pressure values
         if (glucoseData.x && glucoseData.x.length > 0) {
           glucoseData.x.forEach((ts, i) => {
             const bg = glucoseData.y[i]
             if (!Number.isFinite(bg) || bg <= 0) return
 
-            // Look up pressure at this timestamp (with 1-minute tolerance)
             const tsKey = Math.round(ts.getTime() / 60000)
             const pressure = pressureMap.get(tsKey)
 
@@ -515,104 +513,213 @@ export function PlotlyGlucoseChart({
           lastPastBgPressure = pastPressure[pastPressure.length - 1]
         }
 
-        // ALWAYS add past BG Pressure traces (even if empty) to ensure future traces
-        // have the correct previous trace for fill:tonexty
-        // First trace: Pressure line (one edge of shaded area)
-        data.push({
-          type: 'scatter',
-          mode: 'lines',
-          name: 'BG Pressure (past)',
-          x: pastTimestamps.length > 0 ? pastTimestamps : [lastTimestamp],
-          y: pastTimestamps.length > 0 ? pastPressure : [lastPastBgPressure],
-          line: { color: 'rgba(0,0,0,0)', width: 0, shape: 'linear' },
-          yaxis: 'y',
-          showlegend: false,
-          hoverinfo: 'skip',
+        // DUAL-COLOR approach: Split into insulin-dominant and carb-dominant segments
+        // For each segment, use null values to break the fill where color changes
+        const insulinDominantPressure: (number | null)[] = []
+        const insulinDominantBg: (number | null)[] = []
+        const carbDominantPressure: (number | null)[] = []
+        const carbDominantBg: (number | null)[] = []
+
+        pastTimestamps.forEach((_, i) => {
+          const bg = pastGlucose[i]
+          const pressure = pastPressure[i]
+          const diff = pressure - bg  // Positive = carbs winning, Negative = insulin winning
+
+          if (diff < 0) {
+            // Insulin dominant (pressure below BG) - blue fill
+            insulinDominantPressure.push(pressure)
+            insulinDominantBg.push(bg)
+            carbDominantPressure.push(null)
+            carbDominantBg.push(null)
+          } else {
+            // Carb dominant (pressure above BG) - amber fill
+            carbDominantPressure.push(pressure)
+            carbDominantBg.push(bg)
+            insulinDominantPressure.push(null)
+            insulinDominantBg.push(null)
+          }
         })
 
-        // Second trace: Glucose - must match BG line exactly
-        data.push({
-          type: 'scatter',
-          mode: 'lines',
-          name: 'BG Pressure Area (past)',
-          x: pastTimestamps.length > 0 ? pastTimestamps : [lastTimestamp],
-          y: pastTimestamps.length > 0 ? pastGlucose : [lastGlucose],
-          line: { color: 'rgba(0,0,0,0)', width: 0, shape: 'linear' },
-          fill: 'tonexty',
-          fillcolor: PRESSURE_FILL,
-          yaxis: 'y',
-          showlegend: false,
-          hoverinfo: 'skip',
-        })
+        // Add insulin-dominant traces (blue - when pressure < BG)
+        if (insulinDominantPressure.some(v => v !== null)) {
+          data.push({
+            type: 'scatter',
+            mode: 'lines',
+            name: 'Insulin Pressure (past)',
+            x: pastTimestamps,
+            y: insulinDominantPressure,
+            line: { color: 'rgba(0,0,0,0)', width: 0, shape: 'linear' },
+            yaxis: 'y',
+            showlegend: false,
+            hoverinfo: 'skip',
+            connectgaps: false,
+          })
+
+          data.push({
+            type: 'scatter',
+            mode: 'lines',
+            name: 'Insulin Pressure Area (past)',
+            x: pastTimestamps,
+            y: insulinDominantBg,
+            line: { color: 'rgba(0,0,0,0)', width: 0, shape: 'linear' },
+            fill: 'tonexty',
+            fillcolor: INSULIN_DOMINANT_FILL,
+            yaxis: 'y',
+            showlegend: false,
+            hoverinfo: 'skip',
+            connectgaps: false,
+          })
+        }
+
+        // Add carb-dominant traces (amber - when pressure > BG)
+        if (carbDominantPressure.some(v => v !== null)) {
+          data.push({
+            type: 'scatter',
+            mode: 'lines',
+            name: 'Carb Pressure (past)',
+            x: pastTimestamps,
+            y: carbDominantPressure,
+            line: { color: 'rgba(0,0,0,0)', width: 0, shape: 'linear' },
+            yaxis: 'y',
+            showlegend: false,
+            hoverinfo: 'skip',
+            connectgaps: false,
+          })
+
+          data.push({
+            type: 'scatter',
+            mode: 'lines',
+            name: 'Carb Pressure Area (past)',
+            x: pastTimestamps,
+            y: carbDominantBg,
+            line: { color: 'rgba(0,0,0,0)', width: 0, shape: 'linear' },
+            fill: 'tonexty',
+            fillcolor: CARB_DOMINANT_FILL,
+            yaxis: 'y',
+            showlegend: false,
+            hoverinfo: 'skip',
+            connectgaps: false,
+          })
+        }
       }
 
       // === FUTURE GRADIENT ===
       // Fill between Predicted BG (orange line) and future BG Pressure (invisible)
+      // DUAL-COLOR: Blue for insulin-dominant, Amber for carb-dominant
       // IMPORTANT: Future BG Pressure continues from lastPastBgPressure for smooth transition
       if (effectData.timestamps.length > 0 && effectData.expectedBg.length > 0) {
         // Calculate future BG Pressure that continues from the past pressure
-        // The pressure decays toward the expected BG over time (IOB/COB effects diminish)
         const futurePressureY: number[] = effectData.timestamps.map((_, i) => {
-          // Get effects at this time point
           const iobEffect = effectData.iobEffect[i] || 0
           const cobEffect = effectData.cobEffect[i] || 0
           const expectedBg = effectData.expectedBg[i]
 
-          // Calculate decay factor - pressure converges toward expectedBg over time
-          // At t=0, use lastPastBgPressure; at t→∞, converge to expectedBg
           const minutesAhead = (effectData.timestamps[i].getTime() - lastTimestamp.getTime()) / 60000
-          const decayFactor = Math.exp(-minutesAhead / 60)  // ~37% at 60 min
+          const decayFactor = Math.exp(-minutesAhead / 60)
 
-          // BG Pressure is a blend between past pressure and expected BG
-          // Plus an offset based on the active IOB/COB forces
           const netEffect = iobEffect + cobEffect
-          const pressureOffset = netEffect * 0.5 * decayFactor  // Pressure shows the force direction
+          const pressureOffset = netEffect * 0.5 * decayFactor
 
-          // Blend: start from past pressure, decay toward expected + offset
           const blendedPressure = lastPastBgPressure * decayFactor + expectedBg * (1 - decayFactor) + pressureOffset
-
           return blendedPressure
         })
 
-        // Include connection point at lastTimestamp for smooth transition from past
-        // Skip the t=0 point from effectData since it duplicates lastTimestamp
+        // Prepare data arrays with connection point at lastTimestamp
         const futureTimestamps = effectData.timestamps.filter((_, i) => i > 0 || effectData.timestamps.length === 1)
         const futureExpectedBgFiltered = effectData.expectedBg.filter((_, i) => i > 0 || effectData.expectedBg.length === 1)
         const futurePressureFiltered = futurePressureY.filter((_, i) => i > 0 || futurePressureY.length === 1)
 
         const futureX: Date[] = [lastTimestamp, ...futureTimestamps]
         const futurePredictedY: number[] = [lastGlucose, ...futureExpectedBgFiltered]
-        // Start future pressure at lastPastBgPressure for continuity
         const futurePressureFull: number[] = [lastPastBgPressure, ...futurePressureFiltered]
 
-        // First trace: Pressure line (one edge of shaded area)
-        // Use LINEAR shape - no smoothing to ensure fill aligns correctly
-        data.push({
-          type: 'scatter',
-          mode: 'lines',
-          name: 'BG Pressure (future)',
-          x: futureX,
-          y: futurePressureFull,  // No smoothing - use raw values
-          line: { color: 'rgba(0,0,0,0)', width: 0, shape: 'linear' },
-          yaxis: 'y',
-          showlegend: false,
-          hoverinfo: 'skip',
+        // DUAL-COLOR: Split future data into insulin-dominant and carb-dominant
+        const futureInsulinPressure: (number | null)[] = []
+        const futureInsulinBg: (number | null)[] = []
+        const futureCarbPressure: (number | null)[] = []
+        const futureCarbBg: (number | null)[] = []
+
+        futureX.forEach((_, i) => {
+          const bg = futurePredictedY[i]
+          const pressure = futurePressureFull[i]
+          const diff = pressure - bg  // Positive = carbs winning, Negative = insulin winning
+
+          if (diff < 0) {
+            // Insulin dominant (pressure below predicted BG) - blue fill
+            futureInsulinPressure.push(pressure)
+            futureInsulinBg.push(bg)
+            futureCarbPressure.push(null)
+            futureCarbBg.push(null)
+          } else {
+            // Carb dominant (pressure above predicted BG) - amber fill
+            futureCarbPressure.push(pressure)
+            futureCarbBg.push(bg)
+            futureInsulinPressure.push(null)
+            futureInsulinBg.push(null)
+          }
         })
 
-        // Second trace: Predicted BG
-        data.push({
-          type: 'scatter',
-          mode: 'lines',
-          name: 'BG Pressure Area (future)',
-          x: futureX,
-          y: futurePredictedY,
-          line: { color: 'rgba(0,0,0,0)', width: 0, shape: 'linear' },
-          fill: 'tonexty',
-          fillcolor: PRESSURE_FILL,
-          yaxis: 'y',
-          showlegend: false,
-          hoverinfo: 'skip',
-        })
+        // Add future insulin-dominant traces (blue)
+        if (futureInsulinPressure.some(v => v !== null)) {
+          data.push({
+            type: 'scatter',
+            mode: 'lines',
+            name: 'Insulin Pressure (future)',
+            x: futureX,
+            y: futureInsulinPressure,
+            line: { color: 'rgba(0,0,0,0)', width: 0, shape: 'linear' },
+            yaxis: 'y',
+            showlegend: false,
+            hoverinfo: 'skip',
+            connectgaps: false,
+          })
+
+          data.push({
+            type: 'scatter',
+            mode: 'lines',
+            name: 'Insulin Pressure Area (future)',
+            x: futureX,
+            y: futureInsulinBg,
+            line: { color: 'rgba(0,0,0,0)', width: 0, shape: 'linear' },
+            fill: 'tonexty',
+            fillcolor: INSULIN_DOMINANT_FILL,
+            yaxis: 'y',
+            showlegend: false,
+            hoverinfo: 'skip',
+            connectgaps: false,
+          })
+        }
+
+        // Add future carb-dominant traces (amber)
+        if (futureCarbPressure.some(v => v !== null)) {
+          data.push({
+            type: 'scatter',
+            mode: 'lines',
+            name: 'Carb Pressure (future)',
+            x: futureX,
+            y: futureCarbPressure,
+            line: { color: 'rgba(0,0,0,0)', width: 0, shape: 'linear' },
+            yaxis: 'y',
+            showlegend: false,
+            hoverinfo: 'skip',
+            connectgaps: false,
+          })
+
+          data.push({
+            type: 'scatter',
+            mode: 'lines',
+            name: 'Carb Pressure Area (future)',
+            x: futureX,
+            y: futureCarbBg,
+            line: { color: 'rgba(0,0,0,0)', width: 0, shape: 'linear' },
+            fill: 'tonexty',
+            fillcolor: CARB_DOMINANT_FILL,
+            yaxis: 'y',
+            showlegend: false,
+            hoverinfo: 'skip',
+            connectgaps: false,
+          })
+        }
       }
     }
 
@@ -909,9 +1016,9 @@ export function PlotlyGlucoseChart({
       showlegend: false,
       hovermode: 'x unified',
       dragmode: 'pan', // Enable drag-to-pan for horizontal scrolling
-      // Preserve user zoom/pan state across re-renders, reset on timeRange or toggle change
-      // Include toggle states so Plotly resets trace visibility when toggles change
-      uirevision: `${timeRange}-${showIobCobLines}-${showEffectiveBg}`,
+      // Preserve user zoom/pan state across re-renders, only reset on timeRange change
+      // Toggles should just show/hide traces without resetting the view
+      uirevision: timeRange,
       shapes,
       xaxis: {
         type: 'date',
@@ -1050,13 +1157,13 @@ export function PlotlyGlucoseChart({
       )}
       <ChartErrorBoundary fallbackHeight={isFullscreen ? "h-full" : "h-80"}>
         <Plot
-          key={`plot-${showIobCobLines}-${showEffectiveBg}-${timeRange}-${isFullscreen}`}
+          key={`plot-${timeRange}-${isFullscreen}`}
           data={traces}
           layout={layout}
           config={config}
           style={{ width: '100%', height: '100%' }}
           useResizeHandler={true}
-          revision={showIobCobLines ? 1 : 0}
+          revision={traces.length}
         />
       </ChartErrorBoundary>
     </div>

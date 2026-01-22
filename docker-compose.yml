@@ -22,11 +22,16 @@ services:
       - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING}
       # Azure OpenAI
       - GPT41_ENDPOINT=${GPT41_ENDPOINT}
-      - AZURE_OPENAI_KEY=${AZURE_OPENAI_KEY}
+      - AZURE_OPENAI_KEY=${GPT41_API_KEY}
       - GPT41_DEPLOYMENT=${GPT41_DEPLOYMENT:-H4D_Assistant_gpt-4.1}
       - AZURE_OPENAI_API_VERSION=2024-12-01-preview
       # Auth
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev_secret_key_change_in_production}
+      # Microsoft Auth
+      - MICROSOFT_CLIENT_ID=fd015f75-df3a-4ab7-bff4-c0d79da46d75
+      - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-cOf8Q~G5r4dNKLjrHNtdjXkR6FRqHVHwM6FNocrW}
+      - MICROSOFT_TENANT_ID=common
+      - MICROSOFT_REDIRECT_URI=http://localhost:8000/api/auth/microsoft/callback
       # ML
       - MODEL_DEVICE=cpu
       # Development settings
@@ -53,7 +58,7 @@ services:
       dockerfile: Dockerfile.dev
     container_name: t1d-ai-frontend-dev
     ports:
-      - "5173:5173"
+      - "5173:3000"
     environment:
       - VITE_API_URL=http://localhost:8000
       - VITE_WS_URL=ws://localhost:8000

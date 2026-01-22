@@ -128,6 +128,8 @@ class PhysicsBaseline:
         fat_grams: float = 0,
         protein_grams: float = 0,
         hour: Optional[int] = None,
+        metabolic_state: Optional[str] = None,
+        absorption_state: Optional[str] = None,
     ) -> PhysicsPrediction:
         """
         Compute physics-based BG prediction at a single horizon.
@@ -143,6 +145,10 @@ class PhysicsBaseline:
             fat_grams: Fat content (slows COB absorption)
             protein_grams: Protein content
             hour: Current hour for ISF adjustment
+            metabolic_state: Current metabolic state (sick, resistant, normal, sensitive, very_sensitive)
+                            Adjusts insulin kinetics
+            absorption_state: Current absorption state (very_slow, slow, normal, fast, very_fast)
+                            Adjusts carb absorption kinetics
 
         Returns:
             PhysicsPrediction with all calculation details
@@ -161,15 +167,18 @@ class PhysicsBaseline:
         is_dawn = self.is_dawn_window(hour)
 
         # Calculate IOB forcing (negative pressure)
+        # Metabolic state affects insulin kinetics (sick/resistant = slower, sensitive = faster)
         absorbed_insulin = self.iob_service.predict_absorbed(
             current_iob=iob,
             horizon_min=horizon_min,
             hour=hour,
             is_dawn_window=is_dawn,
+            metabolic_state=metabolic_state,
         )
         iob_pressure = -absorbed_insulin * isf * isf_adj
 
         # Calculate COB forcing (positive pressure)
+        # Absorption state affects carb kinetics (slow = delayed rise, fast = quicker rise)
         absorbed_carbs = self.cob_service.predict_absorbed(
             current_cob=cob,
             horizon_min=horizon_min,
@@ -177,6 +186,7 @@ class PhysicsBaseline:
             fat_grams=fat_grams,
             protein_grams=protein_grams,
             hour=hour,
+            absorption_state=absorption_state,
         )
         bg_per_gram = isf / icr
         cob_pressure = absorbed_carbs * bg_per_gram
@@ -194,7 +204,9 @@ class PhysicsBaseline:
         base_confidence = 0.85
         horizon_penalty = horizon_min * 0.002  # 0.2% per minute
         activity_penalty = (abs(iob_pressure) + abs(cob_pressure)) * 0.001
-        confidence = max(0.5, base_confidence - horizon_penalty - activity_penalty)
+        # Also reduce confidence when metabolic state is abnormal (less predictable)
+        state_penalty = 0.05 if metabolic_state and metabolic_state not in (None, "normal") else 0.0
+        confidence = max(0.5, base_confidence - horizon_penalty - activity_penalty - state_penalty)
 
         return PhysicsPrediction(
             horizon_min=horizon_min,
@@ -220,6 +232,8 @@ class PhysicsBaseline:
         fat_grams: float = 0,
         protein_grams: float = 0,
         hour: Optional[int] = None,
+        metabolic_state: Optional[str] = None,
+        absorption_state: Optional[str] = None,
     ) -> Dict[int, PhysicsPrediction]:
         """
         Compute physics predictions at multiple horizons.
@@ -235,6 +249,8 @@ class PhysicsBaseline:
             fat_grams: Fat content
             protein_grams: Protein content
             hour: Current hour
+            metabolic_state: Current metabolic state (affects insulin kinetics)
+            absorption_state: Current absorption state (affects carb kinetics)
 
         Returns:
             Dict mapping horizon_min to PhysicsPrediction
@@ -252,6 +268,8 @@ class PhysicsBaseline:
                 fat_grams=fat_grams,
                 protein_grams=protein_grams,
                 hour=hour,
+                metabolic_state=metabolic_state,
+                absorption_state=absorption_state,
             )
         return predictions
 
@@ -268,6 +286,8 @@ class PhysicsBaseline:
         fat_grams: float = 0,
         protein_grams: float = 0,
         hour: Optional[int] = None,
+        metabolic_state: Optional[str] = None,
+        absorption_state: Optional[str] = None,
     ) -> List[Dict]:
         """
         Compute full BG trajectory for visualization.
@@ -301,6 +321,8 @@ class PhysicsBaseline:
                     fat_grams=fat_grams,
                     protein_grams=protein_grams,
                     hour=hour,
+                    metabolic_state=metabolic_state,
+                    absorption_state=absorption_state,
                 )
 
                 remaining_iob = iob - pred.absorbed_insulin

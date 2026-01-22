@@ -569,15 +569,22 @@ class InsightService:
         bg_pressure: Optional[float] = None,
         tft_predictions: Optional[list] = None,
         recent_gi: Optional[float] = None,
-        absorption_rate: Optional[str] = None
+        absorption_rate: Optional[str] = None,
+        # NEW: Metabolic state context for illness/sensitivity detection
+        pob: float = 0.0,
+        metabolic_state: Optional[str] = None,
+        isf_deviation: Optional[float] = None,
+        absorption_state: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Generate real-time AI insight based on current state.
 
         Provides immediate actionable advice based on:
         - Current BG and trend
-        - Active IOB/COB
-        - All diabetes metrics: ISF, ICR, PIR, recommended dose
+        - Active IOB/COB/POB
+        - LEARNED metabolic parameters: ISF, ICR, PIR (with deviation tracking)
+        - Metabolic state: sick, resistant, normal, sensitive
+        - Absorption state: very_slow, slow, normal, fast
         - TFT predictions with confidence intervals
         - BG Pressure (where BG is heading based on IOB/COB)
         - Recent food (including GI and absorption rate)
@@ -592,36 +599,45 @@ class InsightService:
             predictions: Dict with linear, lstm predictions (deprecated)
             recent_food: Description of recently eaten food
             recent_insulin: Amount of recent insulin dose
-            isf: Insulin Sensitivity Factor
-            icr: Insulin to Carb Ratio
-            pir: Protein to Insulin Ratio
+            isf: Insulin Sensitivity Factor (learned value)
+            icr: Insulin to Carb Ratio (learned value)
+            pir: Protein to Insulin Ratio (learned value)
             dose: Currently recommended correction dose
             bg_pressure: BG Pressure - net effect of IOB/COB
             tft_predictions: TFT predictions with confidence intervals
             recent_gi: Glycemic Index of recent food
             absorption_rate: Absorption rate of recent food
+            pob: Protein on board
+            metabolic_state: Current metabolic state (sick/resistant/normal/sensitive)
+            isf_deviation: ISF deviation percentage from baseline
+            absorption_state: Absorption state (very_slow/slow/normal/fast)
 
         Returns:
             Real-time insight with advice
         """
         try:
-            # Build context for GPT with all available data
+            # Build context for GPT with all available data including metabolic state
             context = {
                 "currentBg": current_bg,
                 "trend": trend,
                 "iob": iob,
                 "cob": cob,
+                "pob": pob,
                 "recentFood": recent_food,
                 "recentInsulin": recent_insulin,
-                # All diabetes metrics for comprehensive AI advice
-                "isf": isf if isf else 50,  # Default ISF if not provided
-                "icr": icr if icr else 10,  # Default ICR if not provided
-                "pir": pir if pir else 14,  # Default PIR if not provided
-                "dose": dose if dose else 0,  # Recommended correction dose
+                # LEARNED diabetes metrics (NOT defaults)
+                "isf": isf if isf else 50,
+                "icr": icr if icr else 10,
+                "pir": pir if pir else 25,
+                "dose": dose if dose else 0,
                 "bgPressure": bg_pressure if bg_pressure else 0,
                 "tftPredictions": tft_predictions or [],
                 "recentGI": recent_gi,
-                "absorptionRate": absorption_rate
+                "absorptionRate": absorption_rate,
+                # NEW: Metabolic state context for illness-aware recommendations
+                "metabolicState": metabolic_state or "normal",
+                "isfDeviation": isf_deviation or 0.0,
+                "absorptionState": absorption_state or "normal"
             }
 
             # Use GPT to generate real-time advice

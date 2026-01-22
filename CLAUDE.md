@@ -30,6 +30,10 @@ pytest tests/test_insights.py -v  # Single test file
 **Do not deploy without explicit user permission.**
 
 ```bash
+# One-command deployment (recommended)
+./deploy.sh
+
+# Or manual steps:
 # 1. Build frontend
 cd frontend && npm run build
 
@@ -47,6 +51,19 @@ az webapp start --name t1d-ai --resource-group rg-knowledge2ai-eastus
 
 # 5. Verify (after ~90s)
 curl -s https://t1d-ai.azurewebsites.net/health
+```
+
+### Git Workflow
+
+Use feature branches for safe development. See `docs/git-workflow-guide.md` for details.
+
+```bash
+git checkout -b feature/your-feature    # Create feature branch
+./deploy.sh                              # Deploy to test
+# If it works:
+git checkout main && git merge feature/your-feature
+# If it breaks:
+git checkout main && ./deploy.sh         # Rollback to stable main
 ```
 
 ### Linting
@@ -143,3 +160,13 @@ Required variables are in `backend/src/config.py`. Key ones:
 - `STORAGE_CONNECTION_STRING`
 
 View Azure settings: `az webapp config appsettings list --name t1d-ai --resource-group rg-knowledge2ai-eastus -o table`
+
+## Documentation
+
+| File | Purpose |
+|------|---------|
+| `deploy.sh` | One-command deployment script |
+| `DEPLOYMENT.md` | Step-by-step deployment documentation |
+| `docs/git-workflow-guide.md` | Git feature branch workflow guide |
+| `docs/azure-deployment-setup.md` | Azure deployment setup and troubleshooting |
+| `CLAUDE.md` | This file - project overview for Claude Code |

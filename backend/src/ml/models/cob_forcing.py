@@ -30,6 +30,16 @@ MEDIUM_HALF_LIFE_MIN = 45.0  # Medium GI (bread, rice)
 SLOW_HALF_LIFE_MIN = 60.0    # Low GI (beans, whole grains)
 HIGH_FAT_HALF_LIFE_MIN = 90.0  # High fat meals (pizza, pasta with cream)
 
+# Absorption state adjustment factors for carb kinetics
+# These modify the half-life based on detected absorption patterns
+ABSORPTION_STATE_FACTORS = {
+    "very_slow": 1.50,      # Gastroparesis/very slow digestion - 50% slower
+    "slow": 1.25,           # Slow digestion - 25% slower
+    "normal": 1.0,          # Baseline
+    "fast": 0.80,           # Fast absorption - 20% faster
+    "very_fast": 0.65,      # Very fast (e.g., glucose tabs) - 35% faster
+}
+
 
 class COBForcingModel(nn.Module):
     """
@@ -149,17 +159,21 @@ class COBForcingService:
         glycemic_index: float = 55,
         fat_grams: float = 0,
         protein_grams: float = 0,
+        absorption_state: Optional[str] = None,
     ) -> float:
         """
-        Estimate carb absorption half-life based on food composition.
+        Estimate carb absorption half-life based on food composition and absorption state.
 
         High GI + low fat = fast absorption
         Low GI + high fat = slow absorption (pizza effect)
+        Absorption state further modifies based on detected patterns
 
         Args:
             glycemic_index: GI value (0-100), default 55 (medium)
             fat_grams: Fat content in grams
             protein_grams: Protein content in grams
+            absorption_state: Current absorption state (very_slow, slow, normal, fast, very_fast)
+                            Adjusts carb kinetics based on detected absorption patterns
 
         Returns:
             half_life_min: Estimated absorption half-life in minutes
@@ -181,7 +195,15 @@ class COBForcingService:
 
         # Total half-life (capped at reasonable maximum)
         total_half_life = base_half_life + fat_extension + protein_extension
-        return min(total_half_life, 180.0)  # Cap at 3 hours
+
+        # Apply absorption state adjustment
+        if absorption_state and absorption_state in ABSORPTION_STATE_FACTORS:
+            adjustment_factor = ABSORPTION_STATE_FACTORS[absorption_state]
+            total_half_life = total_half_life * adjustment_factor
+            if absorption_state != "normal":
+                logger.debug(f"COB half-life adjusted for {absorption_state}: base -> {total_half_life:.1f} min")
+
+        return min(total_half_life, 240.0)  # Cap at 4 hours (higher for slow absorption)
 
     def predict_remaining(
         self,
@@ -193,6 +215,7 @@ class COBForcingService:
         hour: Optional[int] = None,
         is_recent_meal: bool = False,
         is_stacking: bool = False,
+        absorption_state: Optional[str] = None,
     ) -> float:
         """
         Predict remaining COB at a future horizon.
@@ -206,6 +229,7 @@ class COBForcingService:
             hour: Current hour (0-23)
             is_recent_meal: True if within 30 min of eating
             is_stacking: True if multiple meals overlapping
+            absorption_state: Current absorption state (affects carb kinetics)
 
         Returns:
             remaining_cob: COB that will remain at horizon (grams)
@@ -222,8 +246,8 @@ class COBForcingService:
         if hour is None:
             hour = datetime.utcnow().hour
 
-        # Estimate half-life from food composition
-        half_life = self.estimate_half_life(glycemic_index, fat_grams, protein_grams)
+        # Estimate half-life from food composition and absorption state
+        half_life = self.estimate_half_life(glycemic_index, fat_grams, protein_grams, absorption_state)
 
         # Try ML model
         if self._use_ml and self.model is not None:
@@ -236,12 +260,19 @@ class COBForcingService:
                 with torch.no_grad():
                     remaining_fraction = self.model(features).item()
 
+                # Apply absorption state adjustment to ML prediction as well
+                if absorption_state and absorption_state in ABSORPTION_STATE_FACTORS and absorption_state != "normal":
+                    factor = ABSORPTION_STATE_FACTORS[absorption_state]
+                    # Scale the decay: if factor > 1 (slower), more remains; if factor < 1 (faster), less remains
+                    adjusted_fraction = remaining_fraction ** (1.0 / factor)
+                    remaining_fraction = max(0.0, min(1.0, adjusted_fraction))
+
                 remaining_cob = current_cob * max(0.0, min(1.0, remaining_fraction))
                 return round(remaining_cob, 1)
             except Exception as e:
                 logger.warning(f"COB ML prediction failed: {e}")
 
-        # Fallback: exponential decay with composition-based half-life
+        # Fallback: exponential decay with absorption-state-adjusted half-life
         remaining_fraction = 0.5 ** (horizon_min / half_life)
         return round(current_cob * remaining_fraction, 1)
 
@@ -255,6 +286,7 @@ class COBForcingService:
         hour: Optional[int] = None,
         is_recent_meal: bool = False,
         is_stacking: bool = False,
+        absorption_state: Optional[str] = None,
     ) -> float:
         """
         Predict how many carbs will be absorbed by horizon.
@@ -268,6 +300,7 @@ class COBForcingService:
             hour: Current hour
             is_recent_meal: Recent meal flag
             is_stacking: Stacking flag
+            absorption_state: Current absorption state (affects carb kinetics)
 
         Returns:
             absorbed_carbs: Grams of carbs absorbed (always positive)
@@ -275,7 +308,7 @@ class COBForcingService:
         remaining = self.predict_remaining(
             current_cob, horizon_min, glycemic_index,
             fat_grams, protein_grams, hour,
-            is_recent_meal, is_stacking
+            is_recent_meal, is_stacking, absorption_state
         )
         return round(current_cob - remaining, 1)
 
@@ -291,6 +324,7 @@ class COBForcingService:
         hour: Optional[int] = None,
         is_recent_meal: bool = False,
         is_stacking: bool = False,
+        absorption_state: Optional[str] = None,
     ) -> float:
         """
         Calculate the BG-raising pressure from COB at horizon.
@@ -306,6 +340,7 @@ class COBForcingService:
             hour: Current hour
             is_recent_meal: Recent meal flag
             is_stacking: Stacking flag
+            absorption_state: Current absorption state (affects carb kinetics)
 
         Returns:
             bg_pressure: Expected BG change (POSITIVE - carbs raise BG)
@@ -313,7 +348,7 @@ class COBForcingService:
         absorbed = self.predict_absorbed(
             current_cob, horizon_min, glycemic_index,
             fat_grams, protein_grams, hour,
-            is_recent_meal, is_stacking
+            is_recent_meal, is_stacking, absorption_state
         )
 
         # BG pressure = absorbed carbs * (ISF / ICR)

@@ -118,6 +118,8 @@ class ForcingFunctionEnsemble:
         bg_volatility: float = 0,
         dawn_intensity: float = 0.5,
         hour: Optional[int] = None,
+        metabolic_state: Optional[str] = None,
+        absorption_state: Optional[str] = None,
     ) -> ForcingPrediction:
         """
         Generate prediction at a single horizon.
@@ -136,6 +138,10 @@ class ForcingFunctionEnsemble:
             bg_volatility: Std dev of recent BG
             dawn_intensity: Dawn phenomenon intensity (0-1)
             hour: Current hour
+            metabolic_state: Current metabolic state (sick, resistant, normal, sensitive, very_sensitive)
+                            Adjusts insulin kinetics - sick/resistant = slower action
+            absorption_state: Current absorption state (very_slow, slow, normal, fast, very_fast)
+                            Adjusts carb kinetics - slow = delayed BG rise
 
         Returns:
             ForcingPrediction with all components
@@ -150,6 +156,7 @@ class ForcingFunctionEnsemble:
             icr = self.default_icr
 
         # Step 1: Get physics baseline (IOB/COB forcing functions)
+        # Pass metabolic and absorption state for kinetics adjustments
         physics_pred = self.physics.predict(
             current_bg=current_bg,
             iob=iob,
@@ -161,6 +168,8 @@ class ForcingFunctionEnsemble:
             fat_grams=fat_grams,
             protein_grams=protein_grams,
             hour=hour,
+            metabolic_state=metabolic_state,
+            absorption_state=absorption_state,
         )
 
         # Step 2: Extract secondary features for residual model

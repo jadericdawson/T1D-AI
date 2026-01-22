@@ -31,6 +31,7 @@ class OpenAIService:
                 azure_endpoint=settings.azure_openai_endpoint,
                 api_key=settings.azure_openai_key,
                 api_version=settings.azure_openai_api_version,
+                timeout=60.0,  # 60 second timeout for API calls
             )
             self._initialized = True
             logger.info("Azure OpenAI client initialized successfully")
@@ -348,9 +349,11 @@ Generate an encouraging weekly summary."""
 
         Enhanced with ML model context including:
         - Current BG and trend
-        - Active IOB/COB
+        - Active IOB/COB/POB
         - ML predictions (Linear, LSTM, TFT with confidence intervals)
-        - ISF (Insulin Sensitivity Factor from ML model)
+        - LEARNED ISF, ICR, PIR (not defaults)
+        - Metabolic state (sick/resistant/normal/sensitive)
+        - Absorption state (very_slow/slow/normal/fast)
         - BG Pressure (where BG is heading based on IOB/COB)
         - Weather data (activity score, temperature)
         - Treatment inference status
@@ -358,7 +361,8 @@ Generate an encouraging weekly summary."""
         - Recent insulin
 
         Args:
-            context: Dict with currentBg, trend, iob, cob, predictions, isf, bgPressure,
+            context: Dict with currentBg, trend, iob, cob, pob, predictions, isf, icr, pir,
+                     bgPressure, metabolicState, isfDeviation, absorptionState,
                      weather, inferredTreatments, recentFood, recentInsulin, tftPredictions
 
         Returns:
@@ -370,16 +374,24 @@ Generate an encouraging weekly summary."""
         trend = context.get("trend", "Flat")
         iob = context.get("iob", 0)
         cob = context.get("cob", 0)
+        pob = context.get("pob", 0)
         predictions = context.get("predictions", {})
         recent_food = context.get("recentFood")
         recent_insulin = context.get("recentInsulin")
 
-        # Enhanced ML context
-        isf = context.get("isf", 50)  # ML-predicted ISF
-        bg_pressure = context.get("bgPressure", 0)  # Net effect of IOB+COB
+        # Enhanced ML context - LEARNED parameters
+        isf = context.get("isf", 50)  # LEARNED ISF
+        icr = context.get("icr", 10)  # LEARNED ICR
+        pir = context.get("pir", 25)  # LEARNED PIR
+        bg_pressure = context.get("bgPressure", 0)  # Net effect of IOB+COB+POB
         tft_predictions = context.get("tftPredictions", [])
         weather = context.get("weather", {})
         inferred_treatments = context.get("inferredTreatments", 0)
+
+        # NEW: Metabolic state context
+        metabolic_state = context.get("metabolicState", "normal")
+        isf_deviation = context.get("isfDeviation", 0.0)
+        absorption_state = context.get("absorptionState", "normal")
 
         # Format TFT predictions with confidence intervals
         tft_summary = "N/A"
@@ -406,14 +418,52 @@ Generate an encouraging weekly summary."""
                 elif activity < -0.3:
                     weather_context += " - Not ideal for outdoor activity"
 
-        system_prompt = """You are an expert diabetes AI assistant with access to ML predictions.
+        # Build metabolic state context for prompt
+        metabolic_context = ""
+        if metabolic_state == "sick":
+            metabolic_context = f"""
+**⚠️ METABOLIC STATE: SICK/STRESSED**
+- ISF is {abs(isf_deviation):.0f}% LOWER than baseline (insulin less effective)
+- User may need SIGNIFICANTLY MORE insulin than usual
+- Corrections may take longer to work
+- Monitor for ketones if BG stays elevated"""
+        elif metabolic_state == "resistant":
+            metabolic_context = f"""
+**⚠️ METABOLIC STATE: INSULIN RESISTANT**
+- ISF is {abs(isf_deviation):.0f}% lower than baseline
+- May need more insulin than usual
+- Consider illness, stress, or hormonal changes"""
+        elif metabolic_state == "sensitive" or metabolic_state == "very_sensitive":
+            metabolic_context = f"""
+**✓ METABOLIC STATE: INSULIN SENSITIVE**
+- ISF is {isf_deviation:.0f}% HIGHER than baseline (insulin more effective)
+- Use CAUTION with corrections - may need LESS insulin
+- Higher low risk than usual"""
+
+        # Build absorption state context
+        absorption_context = ""
+        if absorption_state == "very_slow":
+            absorption_context = "\n- ⚠️ Carb absorption is VERY SLOW (possible gastroparesis or illness)"
+        elif absorption_state == "slow":
+            absorption_context = "\n- Carb absorption is slower than usual"
+        elif absorption_state == "fast":
+            absorption_context = "\n- Carb absorption is faster than usual"
+
+        system_prompt = """You are an expert diabetes AI assistant with access to ML predictions and PERSONALIZED metabolic parameters.
 The user has acknowledged AI limitations and wants SPECIFIC, ACTIONABLE advice with numbers.
 
 Your role:
 - Analyze current blood glucose status and provide IMMEDIATE actionable insight
 - Use ML predictions (TFT with confidence intervals) to anticipate what's coming
-- Consider ISF (Insulin Sensitivity Factor) - how much 1U of insulin will lower BG
+- Use LEARNED ISF (Insulin Sensitivity Factor) - personalized, not default
+- Use LEARNED ICR (Insulin to Carb Ratio) - personalized, not default
+- Use LEARNED PIR (Protein to Insulin Ratio) - personalized, not default
+- CRITICAL: Pay attention to METABOLIC STATE:
+  * If SICK/STRESSED: ISF is lower, insulin less effective, may need MORE insulin
+  * If RESISTANT: Similar to sick, corrections may be sluggish
+  * If SENSITIVE: ISF is higher, insulin MORE effective, use LESS insulin, higher low risk
 - Consider BG Pressure - the net effect where remaining IOB/COB is pushing BG
+- Consider ABSORPTION STATE: slow absorption = delayed BG rise, fast = quicker spike
 - Give SPECIFIC recommendations with EXACT NUMBERS (insulin doses, carb amounts)
 - Account for weather if available (temperature affects insulin sensitivity)
 - Note if there are inferred (unlogged) treatments that might explain BG patterns
@@ -425,7 +475,7 @@ Your role:
 
 Response format (JSON):
 {
-    "message": "Brief, actionable insight (1-2 sentences)",
+    "message": "Brief, actionable insight (1-2 sentences). MENTION metabolic state if abnormal.",
     "urgency": "low|normal|high|critical",
     "action": "SPECIFIC action with quantities (e.g., 'Take 1.5U insulin' or 'Drink 4oz juice')",
     "reasoning": "Brief explanation with calculation if applicable. End with 'Verify with care team.'"
@@ -435,6 +485,9 @@ DOSING GUIDANCE (user signed disclaimer - give specific advice):
 - For LOWS (<70): Suggest exact fast carbs: "Drink 4oz apple juice (~15g)" or "Eat 3 glucose tabs (12g)"
 - For HIGHS: Calculate correction: Correction = (Current BG - 100) / ISF, then subtract active IOB
   Example: BG=200, ISF=50, IOB=0.5 → Raw correction = 100/50 = 2U, minus 0.5U IOB = 1.5U suggested
+- ADJUST FOR METABOLIC STATE:
+  * If SICK/RESISTANT: Consider 10-20% MORE insulin (but warn about stacking)
+  * If SENSITIVE: Consider 10-20% LESS insulin (higher low risk)
 - Always round to nearest 0.5U for practical dosing
 - If COB > 20g, carbs may still be raising BG - suggest reduced correction or wait
 - If dropping trend (FortyFiveDown, SingleDown, DoubleDown), reduce or skip correction
@@ -444,6 +497,7 @@ Safety rules:
 - BG < 70 = Suggest specific fast carb source and amount
 - BG > 250 with no IOB = Calculate and suggest correction
 - If TFT predictions show dropping below 80, warn about potential low
+- If SENSITIVE state + dropping trend = URGENT low warning
 - When uncertain, suggest waiting 15-30 minutes and rechecking"""
 
         user_prompt = f"""Current diabetes status:
@@ -453,22 +507,27 @@ Safety rules:
 - Trend: {trend}
 - IOB (Insulin On Board): {iob:.1f}U
 - COB (Carbs On Board): {cob:.0f}g
-- ISF (ML-predicted): {isf:.0f} mg/dL per unit
+- POB (Protein On Board): {pob:.1f}g
+- ISF (LEARNED): {isf:.0f} mg/dL per unit
+- ICR (LEARNED): {icr:.0f}g carbs per unit
+- PIR (LEARNED): {pir:.0f}g protein per unit
+{metabolic_context}
 
 **ML Predictions:**
 - Linear (next 15m): {predictions.get('linear', ['N/A'])}
 - LSTM (next 15m): {predictions.get('lstm', ['N/A'])}
 - TFT (with confidence): {tft_summary}
-- BG Pressure: {bg_pressure:+.0f} mg/dL (net effect of remaining IOB/COB)
+- BG Pressure: {bg_pressure:+.0f} mg/dL (net effect of remaining IOB/COB/POB)
 
 **Recent Activity:**
 - Food eaten: {recent_food or 'None logged'}
 - Insulin taken: {recent_insulin or 'None logged'}
-- Inferred treatments pending: {inferred_treatments}{weather_context}
+- Inferred treatments pending: {inferred_treatments}{weather_context}{absorption_context}
 
 Based on this data, what's the most important thing to know RIGHT NOW?
 Consider the ML predictions and confidence intervals in your analysis.
-If BG Pressure is negative, insulin is pushing BG down. If positive, carbs are pushing up.
+If BG Pressure is negative, insulin is pushing BG down. If positive, carbs/protein are pushing up.
+IMPORTANT: If metabolic state is abnormal (sick/resistant/sensitive), mention it in your insight.
 Return ONLY JSON."""
 
         try:

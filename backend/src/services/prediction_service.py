@@ -132,6 +132,9 @@ class PredictionService:
         self._cached_isf: Optional[float] = None
         self._cached_icr: Optional[float] = None
         self._cached_pir: Optional[float] = None
+        # NEW: Cache metabolic state for decay curve adjustments
+        self._cached_metabolic_state: Optional[str] = None  # sick, resistant, normal, sensitive
+        self._cached_absorption_state: Optional[str] = None  # very_slow, slow, normal, fast
 
         # Forcing function ensemble for physics-informed predictions
         # Uses IOB/COB as primary forcing functions with neural residual
@@ -323,6 +326,33 @@ class PredictionService:
     def forcing_available(self) -> bool:
         """Check if forcing function ensemble predictions are available."""
         return self._forcing_ensemble is not None
+
+    def _get_adjusted_iob_cob_service(self) -> IOBCOBService:
+        """
+        Get IOB/COB service with metabolic state adjustments applied.
+
+        If a metabolic state is cached (sick/resistant/normal/sensitive),
+        returns a service with adjusted decay curves:
+        - Sick/Resistant: Insulin acts 15-20% slower
+        - Sensitive: Insulin acts 10-15% faster
+        - Slow absorption: Carb absorption 25-50% slower
+
+        Returns:
+            IOBCOBService with adjustments (or base service if no adjustment needed)
+        """
+        metabolic_state = self._cached_metabolic_state
+        absorption_state = self._cached_absorption_state
+
+        # If no adjustment needed, return base service
+        if (metabolic_state in (None, "normal") and
+            absorption_state in (None, "normal")):
+            return self._iob_cob_service
+
+        # Return service with metabolic adjustments
+        return self._iob_cob_service.with_metabolic_state(
+            metabolic_state=metabolic_state,
+            absorption_state=absorption_state
+        )
 
     def add_glucose_reading(self, reading: dict) -> None:
         """Add a glucose reading to the feature buffer."""
@@ -1075,13 +1105,26 @@ class PredictionService:
             # This 7-year-old has ~54 min half-life vs 81 min adult formula (30% faster!)
             # The personalized_iob service uses the ML model trained on actual BG responses
 
-            # Carb absorption: half-life ~45 min for medium GI foods
-            carb_half_life_min = 45.0
+            # Get METABOLIC-ADJUSTED absorption parameters
+            # If user is sick/resistant, insulin acts slower; if sensitive, faster
+            # If absorption is slow (gastroparesis), carbs absorb slower
+            adjusted_iob_cob_service = self._get_adjusted_iob_cob_service()
 
-            # Protein absorption parameters (delayed, slower than carbs)
-            # Protein starts affecting BG ~2 hours after eating, peaks at ~3.5 hours
-            protein_onset_min = 120.0  # Protein starts affecting BG
-            protein_half_life_min = 75.0  # Slower decay than carbs (75 vs 45 min)
+            # Carb absorption: uses adjusted parameters if metabolic state is abnormal
+            carb_half_life_min = adjusted_iob_cob_service.carb_half_life_min  # Default 45, adjusted by state
+            insulin_half_life_min = adjusted_iob_cob_service.insulin_half_life_min  # For reference
+
+            # Protein absorption parameters (also adjusted by metabolic state)
+            protein_onset_min = adjusted_iob_cob_service.protein_onset_min  # Default 120, adjusted by state
+            protein_half_life_min = adjusted_iob_cob_service.protein_half_life_min  # Default 75, adjusted by state
+
+            # Log if using adjusted parameters
+            if self._cached_metabolic_state not in (None, "normal") or self._cached_absorption_state not in (None, "normal"):
+                logger.info(
+                    f"Using metabolic-adjusted params: carb_half={carb_half_life_min:.0f}min, "
+                    f"protein_half={protein_half_life_min:.0f}min, protein_onset={protein_onset_min:.0f}min "
+                    f"(state={self._cached_metabolic_state}, absorption={self._cached_absorption_state})"
+                )
 
             # Get current hour for personalized IOB model
             current_hour = datetime.utcnow().hour
@@ -1868,12 +1911,17 @@ class UserPredictionService:
             self._cached_icr = params.icr.value
             self._cached_pir = params.pir.value
 
+            # NEW: Cache metabolic and absorption state for decay curve adjustments
+            self._cached_metabolic_state = params.metabolic_state.value if params.metabolic_state else "normal"
+            self._cached_absorption_state = params.absorption.state if params.absorption else "normal"
+
             # Log if illness detected
             if params.isf.is_sick or params.isf.is_resistant:
                 logger.info(
                     f"Metabolic state for user {user_id}: {params.metabolic_state.value} - "
                     f"ISF deviation: {params.isf.deviation_percent:.1f}% "
-                    f"(baseline={params.isf.baseline:.1f}, effective={params.isf.value:.1f})"
+                    f"(baseline={params.isf.baseline:.1f}, effective={params.isf.value:.1f}), "
+                    f"absorption={self._cached_absorption_state}"
                 )
 
         except Exception as e:
@@ -1884,15 +1932,19 @@ class UserPredictionService:
             self._cached_isf = isf_values.get("default", 50.0)
             self._cached_icr = 10.0
             self._cached_pir = 25.0
+            self._cached_metabolic_state = "normal"
+            self._cached_absorption_state = "normal"
 
         # Get service for this user
         service = await self.get_service_for_user(user_id)
 
-        # Pass cached params to the service instance
+        # Pass cached params to the service instance (including metabolic state for decay adjustments)
         service._cached_user_id = self._cached_user_id
         service._cached_isf = self._cached_isf
         service._cached_icr = self._cached_icr
         service._cached_pir = self._cached_pir
+        service._cached_metabolic_state = self._cached_metabolic_state
+        service._cached_absorption_state = self._cached_absorption_state
 
         # Make prediction
         result = service.predict(

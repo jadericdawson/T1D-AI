@@ -31,7 +31,12 @@ export interface GlucoseUpdate {
     metrics: {
       iob: number
       cob: number
+      pob: number
       isf: number
+      recommendedDose: number
+      proteinDoseNow: number
+      proteinDoseLater: number
+      effectiveBg: number
     }
     modelAvailable: boolean
   }

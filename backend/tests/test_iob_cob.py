@@ -31,12 +31,13 @@ class TestIOBCOBService:
     """Test the IOB/COB service class."""
 
     def test_service_creation(self, mock_settings):
-        """Test service instantiation with default values."""
-        from services.iob_cob_service import IOBCOBService
+        """Test service instantiation with LEARNED default values."""
+        from services.iob_cob_service import IOBCOBService, LEARNED_ABSORPTION_PARAMS
 
         service = IOBCOBService()
-        assert service.insulin_half_life_min == 81.0
-        assert service.carb_half_life_min == 45.0
+        # IOBCOBService uses LEARNED_ABSORPTION_PARAMS which have real-world observed values
+        assert service.insulin_half_life_min == LEARNED_ABSORPTION_PARAMS['iob_half_life_min']
+        assert service.carb_half_life_min == LEARNED_ABSORPTION_PARAMS['cob_half_life_min']
         assert service.target_bg == 100
 
     def test_service_custom_params(self, mock_settings):
@@ -84,21 +85,27 @@ class TestIOBCalculations:
         assert 2.0 < iob < 2.8, f"Expected IOB ~2.3U, got {iob}"
 
     def test_iob_at_half_life(self, mock_settings):
-        """At exactly one half-life, 50% should remain."""
-        from services.iob_cob_service import IOBCOBService
+        """Test IOB at roughly one half-life using three-phase model."""
+        from services.iob_cob_service import IOBCOBService, LEARNED_ABSORPTION_PARAMS
 
         service = IOBCOBService()
+        half_life = LEARNED_ABSORPTION_PARAMS['iob_half_life_min']  # 81 min
+        onset = LEARNED_ABSORPTION_PARAMS['iob_onset_min']  # 15 min
+        ramp = LEARNED_ABSORPTION_PARAMS['iob_ramp_min']  # 25 min
 
         now = datetime.utcnow()
         treatment = MagicMock()
         treatment.insulin = 4.0
-        treatment.timestamp = now - timedelta(minutes=81)  # exactly one half-life
+        # Put treatment at onset + ramp + half_life (when 50% of post-ramp remaining decays)
+        # At onset+ramp: 50% remains, at onset+ramp+half_life: 25% remains
+        treatment.timestamp = now - timedelta(minutes=onset + ramp + half_life)
         treatment.carbs = None
 
         iob = service.calculate_iob([treatment], at_time=now)
 
-        # Should be exactly 2.0 units (50% of 4.0)
-        assert 1.9 < iob < 2.1, f"Expected IOB ~2.0U at half-life, got {iob}"
+        # After onset(15) + ramp(25) + half_life(81) = 121 min:
+        # At ramp end: 50% (2.0U), after one more half-life: 25% (1.0U)
+        assert 0.8 < iob < 1.2, f"Expected IOB ~1.0U at onset+ramp+half-life, got {iob}"
 
     def test_iob_old_bolus(self, mock_settings):
         """Old bolus (past action duration) should have zero IOB."""
@@ -128,8 +135,8 @@ class TestCOBCalculations:
         assert cob == 0.0
 
     def test_cob_with_mock_treatment(self, mock_settings):
-        """Test COB calculation with mocked treatment."""
-        from services.iob_cob_service import IOBCOBService
+        """Test COB calculation with mocked treatment using three-phase model."""
+        from services.iob_cob_service import IOBCOBService, gi_to_absorption_params
 
         service = IOBCOBService()
 
@@ -138,29 +145,46 @@ class TestCOBCalculations:
         treatment.carbs = 45
         treatment.timestamp = now - timedelta(minutes=20)
         treatment.insulin = None
+        treatment.glycemicIndex = 55  # Medium GI
+        treatment.isLiquid = False
+        treatment.protein = None
 
         cob = service.calculate_cob([treatment])
 
-        # After 20 min with 45 min half-life, ~74% should remain
-        # 45 * 0.5^(20/45) = 45 * 0.74 ≈ 33
-        assert 28 < cob < 38, f"Expected COB ~33g, got {cob}"
+        # Three-phase model with GI-based absorption:
+        # For GI=55: onset~10min, ramp~15min (combined ~25min to reach ramp end)
+        # At 20 min (in ramp phase): about 65% still remains due to ramp decay
+        # 45g * 0.65 ≈ 29g
+        # COB should be positive and decreasing as carbs are absorbed
+        assert 25 < cob < 35, f"Expected COB ~29g at 20min (ramp phase), got {cob}"
 
     def test_cob_at_half_life(self, mock_settings):
-        """At exactly one half-life, 50% should remain."""
-        from services.iob_cob_service import IOBCOBService
+        """Test COB at a point where significant absorption has occurred."""
+        from services.iob_cob_service import IOBCOBService, gi_to_absorption_params
 
         service = IOBCOBService()
+
+        # For GI=55: onset~10min, ramp~15min, half_life~40min, duration~180min
+        # At onset+ramp+half_life = 10+15+40 = 65 min:
+        # At ramp end: 50% remains, after one more half-life: 25% remains
+        gi_params = gi_to_absorption_params(55, False)
+        onset = gi_params['onset_min']
+        ramp = gi_params['ramp_min']
+        half_life = gi_params['half_life_min']
 
         now = datetime.utcnow()
         treatment = MagicMock()
         treatment.carbs = 50
-        treatment.timestamp = now - timedelta(minutes=45)  # exactly one half-life
+        treatment.timestamp = now - timedelta(minutes=onset + ramp + half_life)
         treatment.insulin = None
+        treatment.glycemicIndex = 55
+        treatment.isLiquid = False
+        treatment.protein = None
 
         cob = service.calculate_cob([treatment], at_time=now)
 
-        # Should be exactly 25g (50% of 50)
-        assert 24 < cob < 26, f"Expected COB ~25g at half-life, got {cob}"
+        # At ramp end: 50% (25g), after one more half-life: 25% (12.5g)
+        assert 10 < cob < 16, f"Expected COB ~12.5g at onset+ramp+half-life, got {cob}"
 
 
 class TestDoseRecommendations:
@@ -273,23 +297,29 @@ class TestCurrentMetricsCalculation:
 
         now = datetime.utcnow()
 
-        # Create mock treatments
+        # Create mock treatments with all required attributes
         insulin_treatment = MagicMock()
         insulin_treatment.insulin = 3.0
         insulin_treatment.timestamp = now - timedelta(minutes=30)
         insulin_treatment.carbs = None
+        insulin_treatment.protein = None
+        insulin_treatment.glycemicIndex = None
+        insulin_treatment.isLiquid = False
 
         carb_treatment = MagicMock()
         carb_treatment.carbs = 40
         carb_treatment.timestamp = now - timedelta(minutes=20)
         carb_treatment.insulin = None
+        carb_treatment.protein = None
+        carb_treatment.glycemicIndex = 55  # Medium GI
+        carb_treatment.isLiquid = False
 
         iob = service.calculate_iob([insulin_treatment])
         cob = service.calculate_cob([carb_treatment])
 
         # Both should have positive values
-        assert iob > 0
-        assert cob > 0
+        assert iob > 0, f"IOB should be positive, got {iob}"
+        assert cob > 0, f"COB should be positive, got {cob}"
 
         # Dose recommendation should account for both
         dose, effective_bg = service.calculate_dose_recommendation(

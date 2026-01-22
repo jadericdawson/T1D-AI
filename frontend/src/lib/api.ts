@@ -5,8 +5,10 @@
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios'
 import { isTokenExpired, getTokenTimeRemaining } from '@/stores/authStore'
 
-// API Base URL - use relative path for production (same domain), env var for dev
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1'
+// Base domain - use env var for local dev, empty for production (same domain)
+const BASE_DOMAIN = import.meta.env.VITE_API_URL || ''
+// API Base URL - append /api/v1 to the domain
+const API_BASE_URL = `${BASE_DOMAIN}/api/v1`
 
 // Token refresh state management
 let isRefreshing = false
@@ -54,8 +56,7 @@ async function refreshAccessToken(): Promise<string | null> {
     console.log('[API] Attempting token refresh...')
 
     // Use the auth endpoint directly (not through the interceptor)
-    const authUrl = import.meta.env.VITE_API_URL || ''
-    const response = await axios.post(`${authUrl}/api/auth/refresh`, {
+    const response = await axios.post(`${BASE_DOMAIN}/api/auth/refresh`, {
       refresh_token: refreshToken
     }, {
       headers: { 'Content-Type': 'application/json' },
@@ -248,6 +249,15 @@ export interface GlucoseWithPredictions extends GlucoseReading {
   predictions: GlucosePrediction | null
 }
 
+// Food suggestion based on user's historical eating patterns
+export interface FoodSuggestion {
+  name: string
+  carbs: number
+  typical_portion: string
+  glycemic_index?: number | null
+  times_eaten: number
+}
+
 export interface CurrentMetrics {
   iob: number
   cob: number
@@ -257,6 +267,13 @@ export interface CurrentMetrics {
   effectiveBg: number
   proteinDoseNow: number   // Protein insulin to give NOW (with decay)
   proteinDoseLater: number // Protein insulin to give LATER (remaining)
+  // Food recommendation fields (when BG predicted below target)
+  actionType: 'insulin' | 'food' | 'none'
+  recommendedCarbs: number
+  foodSuggestions: FoodSuggestion[]
+  predictedBgWithoutAction: number
+  predictedBgWithAction: number
+  recommendationReasoning: string
 }
 
 export interface PredictionAccuracy {

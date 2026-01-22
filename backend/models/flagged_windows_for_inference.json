@@ -1,0 +1,9 @@
+{
+  "flagged_windows": [
+    {
+      "start_time": "2025-08-03T21:48:50.399000+00:00",
+      "end_time": "2025-08-04T00:48:50.399000+00:00",
+      "reason": "unexplained_bg_rise",
+      "suspected_treatment_type": "carbs",
+      "confidence": 0.638,
+      "bg_change_mg_dl": 

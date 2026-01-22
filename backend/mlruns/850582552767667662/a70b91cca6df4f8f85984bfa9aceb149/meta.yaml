@@ -1,0 +1,14 @@
+artifact_uri: file:///home/jadericdawson/Documents/AI/T1D-AI/backend/mlruns/850582552767667662/a70b91cca6df4f8f85984bfa9aceb149/artifacts
+end_time: 1767623447364
+entry_point_name: ''
+experiment_id: '850582552767667662'
+lifecycle_stage: active
+run_id: a70b91cca6df4f8f85984bfa9aceb149
+run_name: tft_20260105_0925
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1767623139671
+status: 3
+tags: []
+user_id: jadericdawson

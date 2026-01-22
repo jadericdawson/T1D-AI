@@ -11,11 +11,15 @@ from pydantic import BaseModel, Field
 
 from database.repositories import GlucoseRepository, TreatmentRepository, InsightRepository
 from services.insight_service import insight_service
+from services.metabolic_params_service import get_metabolic_params_service
 from models.schemas import AIInsight, User
 from auth import get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/insights", tags=["insights"])
+
+# Get metabolic params service for learned parameters
+metabolic_params_service = get_metabolic_params_service()
 
 # Repository instances
 glucose_repo = GlucoseRepository()
@@ -316,6 +320,7 @@ class RealtimeInsightRequest(BaseModel):
     trend: str = Field(default="Flat", description="Current trend")
     iob: float = Field(default=0, description="Insulin on board")
     cob: float = Field(default=0, description="Carbs on board")
+    pob: float = Field(default=0, description="Protein on board")
     recentFood: Optional[str] = Field(default=None, description="Recent food eaten")
     recentInsulin: Optional[float] = Field(default=None, description="Recent insulin dose")
     # All diabetes metrics for comprehensive AI advice
@@ -327,6 +332,10 @@ class RealtimeInsightRequest(BaseModel):
     tftPredictions: Optional[list] = Field(default=None, description="TFT predictions with confidence")
     recentGI: Optional[float] = Field(default=None, description="GI of recent food")
     absorptionRate: Optional[str] = Field(default=None, description="Absorption rate of recent food")
+    # Metabolic state fields (fetched by endpoint if not provided)
+    metabolicState: Optional[str] = Field(default=None, description="Current metabolic state: sick, resistant, normal, sensitive")
+    isfDeviation: Optional[float] = Field(default=None, description="ISF deviation percentage from baseline")
+    absorptionState: Optional[str] = Field(default=None, description="Absorption state: very_slow, slow, normal, fast")
 
 
 class RealtimeInsightResponse(BaseModel):
@@ -348,33 +357,88 @@ async def get_realtime_insight(
 
     Uses GPT to analyze:
     - Current BG and trend
-    - Active IOB/COB
+    - Active IOB/COB/POB
     - ML predictions
+    - LEARNED metabolic parameters (ISF, ICR, PIR) with deviation tracking
+    - Metabolic state (sick, resistant, normal, sensitive)
+    - Absorption state (slow, normal, fast)
     - Recent food (fat, protein, carbs all affect BG differently)
     - Recent insulin
 
-    Returns immediate, actionable advice.
+    Returns immediate, actionable advice that accounts for personalized metabolic state.
     """
     user_id = current_user.id
     try:
+        # Fetch learned parameters if not provided in request
+        # This ensures AI gets ACTUAL learned values, not defaults
+        isf = request.isf
+        icr = request.icr
+        pir = request.pir
+        metabolic_state = request.metabolicState
+        isf_deviation = request.isfDeviation
+        absorption_state = request.absorptionState
+
+        # If key parameters are missing, fetch from metabolic params service
+        if isf is None or icr is None or metabolic_state is None:
+            try:
+                # Get all metabolic parameters in one call
+                is_fasting = request.cob < 5  # Fasting if minimal COB
+                all_params = await metabolic_params_service.get_all_params(
+                    user_id=user_id,
+                    is_fasting=is_fasting,
+                    include_short_term=True
+                )
+
+                # Use learned values
+                if isf is None:
+                    isf = all_params.isf.value
+                    isf_deviation = all_params.isf.deviation_percent
+                if icr is None:
+                    icr = all_params.icr.value
+                if pir is None:
+                    pir = all_params.pir.value
+                if metabolic_state is None:
+                    metabolic_state = all_params.metabolic_state.value
+                if absorption_state is None and all_params.absorption:
+                    absorption_state = all_params.absorption.state
+
+                logger.info(
+                    f"Using learned params for AI: ISF={isf:.1f} (deviation={isf_deviation:.1f}%), "
+                    f"ICR={icr:.1f}, PIR={pir:.1f}, state={metabolic_state}, "
+                    f"absorption={absorption_state or 'unknown'}"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to fetch learned params, using request/defaults: {e}")
+                # Fall back to defaults if fetch fails
+                isf = isf or 50.0
+                icr = icr or 10.0
+                pir = pir or 25.0
+                metabolic_state = metabolic_state or "normal"
+                isf_deviation = isf_deviation or 0.0
+
         result = await insight_service.get_realtime_insight(
             user_id=user_id,
             current_bg=request.currentBg,
             trend=request.trend,
             iob=request.iob,
             cob=request.cob,
+            pob=request.pob,
             predictions={},  # Deprecated - using TFT predictions
             recent_food=request.recentFood,
             recent_insulin=request.recentInsulin,
-            # All diabetes metrics for comprehensive AI advice
-            isf=request.isf,
-            icr=request.icr,
-            pir=request.pir,
+            # All diabetes metrics with LEARNED values
+            isf=isf,
+            icr=icr,
+            pir=pir,
             dose=request.dose,
             bg_pressure=request.bgPressure,
             tft_predictions=request.tftPredictions,
             recent_gi=request.recentGI,
-            absorption_rate=request.absorptionRate
+            absorption_rate=request.absorptionRate,
+            # NEW: Metabolic state context
+            metabolic_state=metabolic_state,
+            isf_deviation=isf_deviation,
+            absorption_state=absorption_state
         )
 
         return RealtimeInsightResponse(
@@ -430,18 +494,45 @@ async def chat_with_ai(
     - "Should I take a correction now or wait?"
 
     The AI uses current diabetes state (BG, IOB, COB, ISF, etc.)
-    to provide specific, calculated answers.
+    to provide specific, calculated answers with LEARNED metabolic parameters.
     """
+    user_id = current_user.id
     try:
-        # Build context from request - AI gets access to all current data
+        # Fetch learned parameters if not provided in request
+        isf = request.isf
+        icr = request.icr
+        pir = request.pir
+
+        if isf is None or icr is None or pir is None:
+            try:
+                is_fasting = (request.cob or 0) < 5
+                all_params = await metabolic_params_service.get_all_params(
+                    user_id=user_id,
+                    is_fasting=is_fasting,
+                    include_short_term=True
+                )
+                if isf is None:
+                    isf = all_params.isf.value
+                if icr is None:
+                    icr = all_params.icr.value
+                if pir is None:
+                    pir = all_params.pir.value
+                logger.info(f"Chat using learned params: ISF={isf:.1f}, ICR={icr:.1f}, PIR={pir:.1f}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch learned params for chat, using defaults: {e}")
+                isf = isf or 50.0
+                icr = icr or 10.0
+                pir = pir or 25.0
+
+        # Build context from request with LEARNED values
         context = {
             "currentBg": request.currentBg or 120,
             "trend": request.trend or "Flat",
             "iob": request.iob or 0,
             "cob": request.cob or 0,
-            "isf": request.isf or 50,
-            "icr": request.icr or 10,
-            "pir": request.pir or 14,
+            "isf": isf,
+            "icr": icr,
+            "pir": pir,
             "dose": request.dose or 0,
             "bgPressure": request.bgPressure or 0,
             "tftPredictions": request.tftPredictions or [],

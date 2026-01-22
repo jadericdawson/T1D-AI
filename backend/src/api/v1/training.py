@@ -38,6 +38,19 @@ from auth import get_current_user
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/training", tags=["training"])
 
+
+def get_data_user_id(profile_id: str) -> str:
+    """
+    Convert a profile ID to the actual data user ID.
+
+    For 'self' profiles, the profile ID is 'profile_{user_id}' but data
+    is stored with just the raw user_id. This function strips the prefix.
+    """
+    if profile_id.startswith("profile_"):
+        return profile_id[8:]  # Strip "profile_" prefix (8 chars)
+    return profile_id
+
+
 # Repository instances
 model_repo = UserModelRepository()
 job_repo = TrainingJobRepository()
@@ -61,24 +74,46 @@ async def validate_user_access(requester_id: str, target_user_id: str) -> bool:
     Check if requester has access to target user's data.
     Access is granted if:
     - requester_id == target_user_id (viewing own data)
+    - requester owns the target profile (managed profile)
     - requester is a parent with target_user_id in their linkedChildIds
     - target_user has shared their data with requester via the sharing system
     """
     try:
-        if requester_id == target_user_id:
+        # Normalize both IDs for comparison
+        # Profile IDs may have 'profile_' prefix but user IDs don't
+        normalized_requester = get_data_user_id(requester_id)
+        normalized_target = get_data_user_id(target_user_id)
+
+        if normalized_requester == normalized_target:
             return True
 
-        # Check if requester is a parent of the target
+        # Check if requester OWNS this profile (managed profile system)
         try:
-            requester = await user_repo.get_by_id(requester_id)
-            if requester and requester.linkedChildIds and target_user_id in requester.linkedChildIds:
+            from database.repositories import ProfileRepository
+            profile_repo = ProfileRepository()
+            profile = await profile_repo.get_by_id(target_user_id, normalized_requester)
+            if profile:
+                logger.info(f"Access granted via profile ownership: {normalized_requester} owns profile {target_user_id}")
                 return True
+        except Exception as e:
+            logger.warning(f"Error checking profile ownership: {e}")
+
+        # Check if requester is a parent of the target (try both normalized and raw IDs)
+        try:
+            requester = await user_repo.get_by_id(normalized_requester)
+            if requester and requester.linkedChildIds:
+                # Check both normalized and raw target IDs
+                if normalized_target in requester.linkedChildIds or target_user_id in requester.linkedChildIds:
+                    return True
         except Exception as e:
             logger.warning(f"Error checking parent-child access: {e}")
 
-        # Check if target user has shared data with requester
+        # Check if target user has shared data with requester (try both ID forms)
         try:
-            share = await sharing_repo.get_share_for_profile(target_user_id, requester_id)
+            share = await sharing_repo.get_share_for_profile(normalized_target, normalized_requester)
+            if not share:
+                # Try with profile_ prefix
+                share = await sharing_repo.get_share_for_profile(target_user_id, requester_id)
             if share and share.isActive:
                 role_str = share.role.value if hasattr(share.role, 'value') else str(share.role)
                 logger.info(f"Access granted via share: {target_user_id} shared with {requester_id} (role: {role_str})")
@@ -634,7 +669,8 @@ async def get_isf_status(
     target_user_id = user_id if user_id else current_user.id
 
     # Validate access if viewing another user's data
-    if target_user_id != current_user.id:
+    # Must normalize IDs for comparison (profile_xxx vs xxx)
+    if get_data_user_id(target_user_id) != get_data_user_id(current_user.id):
         has_access = await validate_user_access(current_user.id, target_user_id)
         if not has_access:
             raise HTTPException(
@@ -642,9 +678,12 @@ async def get_isf_status(
                 detail="You don't have permission to view this user's ISF status"
             )
 
+    # Normalize for data queries - data is stored with raw user ID, not profile_ prefix
+    data_user_id = get_data_user_id(target_user_id)
+
     try:
         # Get both ISF types
-        isf_data = await isf_repo.get_both(target_user_id)
+        isf_data = await isf_repo.get_both(data_user_id)
 
         fasting = isf_data.get("fasting")
         meal = isf_data.get("meal")
@@ -672,7 +711,7 @@ async def get_isf_status(
             tod_pattern = fasting.timeOfDayPattern
 
         # Calculate short-term ISF from recent data (last 3 days)
-        short_term = await isf_learner.calculate_short_term_isf(target_user_id, days=3)
+        short_term = await isf_learner.calculate_short_term_isf(data_user_id, days=3)
         current_isf = short_term.get("current_isf")
         current_isf_confidence = short_term.get("confidence")
         current_isf_samples = short_term.get("sample_count", 0)
@@ -1067,7 +1106,8 @@ async def get_icr_status(
     target_user_id = user_id if user_id else current_user.id
 
     # Validate access if viewing another user's data
-    if target_user_id != current_user.id:
+    # Must normalize IDs for comparison (profile_xxx vs xxx)
+    if get_data_user_id(target_user_id) != get_data_user_id(current_user.id):
         has_access = await validate_user_access(current_user.id, target_user_id)
         if not has_access:
             raise HTTPException(
@@ -1075,9 +1115,12 @@ async def get_icr_status(
                 detail="You don't have permission to view this user's ICR status"
             )
 
+    # Normalize for data queries - data is stored with raw user ID, not profile_ prefix
+    data_user_id = get_data_user_id(target_user_id)
+
     try:
         # Get all ICR types
-        icr_data = await icr_repo.get_all(target_user_id)
+        icr_data = await icr_repo.get_all(data_user_id)
 
         overall = icr_data.get("overall")
         breakfast = icr_data.get("breakfast")
@@ -1115,7 +1158,7 @@ async def get_icr_status(
             # Get ISF deviation to derive ICR
             from ml.training.isf_learner import ISFLearner
             isf_learner_local = ISFLearner()
-            isf_short_term = await isf_learner_local.calculate_short_term_isf(target_user_id, days=3)
+            isf_short_term = await isf_learner_local.calculate_short_term_isf(data_user_id, days=3)
 
             isf_current = isf_short_term.get("current_isf")
             isf_baseline = isf_short_term.get("baseline_isf")
@@ -1342,7 +1385,8 @@ async def get_pir_status(
     target_user_id = user_id if user_id else current_user.id
 
     # Validate access if viewing another user's data
-    if target_user_id != current_user.id:
+    # Must normalize IDs for comparison (profile_xxx vs xxx)
+    if get_data_user_id(target_user_id) != get_data_user_id(current_user.id):
         has_access = await validate_user_access(current_user.id, target_user_id)
         if not has_access:
             raise HTTPException(
@@ -1350,8 +1394,11 @@ async def get_pir_status(
                 detail="You don't have permission to view this user's PIR status"
             )
 
+    # Normalize for data queries - data is stored with raw user ID, not profile_ prefix
+    data_user_id = get_data_user_id(target_user_id)
+
     try:
-        pir_data = await pir_repo.get_all(target_user_id)
+        pir_data = await pir_repo.get_all(data_user_id)
 
         overall = pir_data.get("overall")
         breakfast = pir_data.get("breakfast")
@@ -1381,7 +1428,7 @@ async def get_pir_status(
             # Get ISF deviation to derive PIR
             from ml.training.isf_learner import ISFLearner
             isf_learner_instance = ISFLearner()
-            isf_short_term = await isf_learner_instance.calculate_short_term_isf(target_user_id, days=3)
+            isf_short_term = await isf_learner_instance.calculate_short_term_isf(data_user_id, days=3)
 
             isf_current = isf_short_term.get("current_isf")
             isf_baseline = isf_short_term.get("baseline_isf")
@@ -1755,7 +1802,8 @@ async def get_metabolic_state(
     target_user_id = user_id if user_id else current_user.id
 
     # Validate access if viewing another user's data
-    if target_user_id != current_user.id:
+    # Must normalize IDs for comparison (profile_xxx vs xxx)
+    if get_data_user_id(target_user_id) != get_data_user_id(current_user.id):
         has_access = await validate_user_access(current_user.id, target_user_id)
         if not has_access:
             raise HTTPException(
@@ -1763,10 +1811,13 @@ async def get_metabolic_state(
                 detail="You don't have permission to view this user's metabolic state"
             )
 
+    # Normalize for data queries - data is stored with raw user ID, not profile_ prefix
+    data_user_id = get_data_user_id(target_user_id)
+
     try:
         service = get_metabolic_params_service()
         params = await service.get_all_params(
-            target_user_id,
+            data_user_id,
             is_fasting=is_fasting,
             meal_type=meal_type,
             include_short_term=True

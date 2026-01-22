@@ -362,6 +362,15 @@ class DataSource(BaseModel):
 
 # ==================== Metrics Models ====================
 
+class FoodSuggestionSchema(BaseModel):
+    """A food suggestion based on user's historical eating patterns."""
+    name: str = Field(..., description="Food name/description")
+    carbs: float = Field(..., description="Carbs in grams")
+    typical_portion: str = Field(default="1 serving", description="Portion description")
+    glycemic_index: Optional[int] = Field(None, description="GI if known")
+    times_eaten: int = Field(default=1, description="How often user has eaten this")
+
+
 class CurrentMetrics(BaseModel):
     """Current calculated metrics for display."""
     iob: float = Field(default=0.0, description="Insulin on Board (units)")
@@ -372,6 +381,14 @@ class CurrentMetrics(BaseModel):
     effectiveBg: int = Field(default=0, description="BG adjusted for IOB/COB/POB")
     proteinDoseNow: float = Field(default=0.0, description="Protein insulin to give NOW (with time decay)")
     proteinDoseLater: float = Field(default=0.0, description="Protein insulin to give LATER (remaining)")
+
+    # Food recommendations (when BG predicted low)
+    actionType: str = Field(default="none", description="Action type: 'insulin', 'food', or 'none'")
+    recommendedCarbs: float = Field(default=0.0, description="Recommended carbs to eat (grams)")
+    foodSuggestions: List[FoodSuggestionSchema] = Field(default_factory=list, description="Food suggestions from user's history")
+    predictedBgWithoutAction: int = Field(default=0, description="Predicted BG at 3hr without action")
+    predictedBgWithAction: int = Field(default=0, description="Predicted BG at 3hr with recommended action")
+    recommendationReasoning: str = Field(default="", description="Explanation of recommendation")
 
 
 class PredictionAccuracy(BaseModel):

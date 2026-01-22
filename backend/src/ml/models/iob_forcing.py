@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 # This 7-year-old metabolizes insulin 30% faster than adult formula (81 min)
 DEFAULT_HALF_LIFE_MIN = 54.0
 
+# Metabolic state adjustment factors for insulin kinetics
+# These modify the half-life based on detected metabolic conditions
+METABOLIC_STATE_FACTORS = {
+    "sick": 1.25,           # Illness slows insulin action by 25%
+    "resistant": 1.15,      # Insulin resistance slows action by 15%
+    "normal": 1.0,          # Baseline
+    "sensitive": 0.90,      # Enhanced sensitivity speeds action by 10%
+    "very_sensitive": 0.80, # Very sensitive speeds action by 20%
+}
+
 
 class IOBForcingModel(nn.Module):
     """
@@ -152,6 +162,7 @@ class IOBForcingService:
         hour: Optional[int] = None,
         is_dawn_window: bool = False,
         is_active_meal: bool = False,
+        metabolic_state: Optional[str] = None,
     ) -> float:
         """
         Predict remaining IOB at a future horizon.
@@ -162,6 +173,8 @@ class IOBForcingService:
             hour: Current hour (0-23), defaults to now
             is_dawn_window: True if 4-8 AM (dawn phenomenon)
             is_active_meal: True if recent carbs (may affect absorption)
+            metabolic_state: Current metabolic state (sick, resistant, normal, sensitive, very_sensitive)
+                            Adjusts insulin kinetics - sick/resistant = slower action, sensitive = faster
 
         Returns:
             remaining_iob: IOB that will remain at horizon (units)
@@ -178,6 +191,14 @@ class IOBForcingService:
         if hour is None:
             hour = datetime.utcnow().hour
 
+        # Apply metabolic state adjustment to half-life
+        adjusted_half_life = self.half_life_min
+        if metabolic_state and metabolic_state in METABOLIC_STATE_FACTORS:
+            adjustment_factor = METABOLIC_STATE_FACTORS[metabolic_state]
+            adjusted_half_life = self.half_life_min * adjustment_factor
+            if metabolic_state != "normal":
+                logger.debug(f"IOB half-life adjusted for {metabolic_state}: {self.half_life_min:.1f} -> {adjusted_half_life:.1f} min")
+
         # Try ML model
         if self._use_ml and self.model is not None:
             try:
@@ -188,13 +209,22 @@ class IOBForcingService:
                 with torch.no_grad():
                     remaining_fraction = self.model(features).item()
 
+                # Apply metabolic state adjustment to ML prediction as well
+                if metabolic_state and metabolic_state in METABOLIC_STATE_FACTORS and metabolic_state != "normal":
+                    # Adjust the remaining fraction based on metabolic state
+                    # Higher factor = more IOB remaining (slower action)
+                    factor = METABOLIC_STATE_FACTORS[metabolic_state]
+                    # Scale the decay: if factor > 1 (slower), more remains; if factor < 1 (faster), less remains
+                    adjusted_fraction = remaining_fraction ** (1.0 / factor)
+                    remaining_fraction = max(0.0, min(1.0, adjusted_fraction))
+
                 remaining_iob = current_iob * max(0.0, min(1.0, remaining_fraction))
                 return round(remaining_iob, 3)
             except Exception as e:
                 logger.warning(f"IOB ML prediction failed: {e}")
 
-        # Fallback: exponential decay with personalized half-life
-        remaining_fraction = 0.5 ** (horizon_min / self.half_life_min)
+        # Fallback: exponential decay with metabolic-adjusted half-life
+        remaining_fraction = 0.5 ** (horizon_min / adjusted_half_life)
         return round(current_iob * remaining_fraction, 3)
 
     def predict_absorbed(
@@ -204,6 +234,7 @@ class IOBForcingService:
         hour: Optional[int] = None,
         is_dawn_window: bool = False,
         is_active_meal: bool = False,
+        metabolic_state: Optional[str] = None,
     ) -> float:
         """
         Predict how much insulin will be absorbed by horizon.
@@ -214,12 +245,13 @@ class IOBForcingService:
             hour: Current hour
             is_dawn_window: Dawn phenomenon flag
             is_active_meal: Active meal flag
+            metabolic_state: Current metabolic state (affects insulin kinetics)
 
         Returns:
             absorbed_insulin: Units of insulin absorbed (always positive)
         """
         remaining = self.predict_remaining(
-            current_iob, horizon_min, hour, is_dawn_window, is_active_meal
+            current_iob, horizon_min, hour, is_dawn_window, is_active_meal, metabolic_state
         )
         return round(current_iob - remaining, 3)
 
@@ -232,6 +264,7 @@ class IOBForcingService:
         hour: Optional[int] = None,
         is_dawn_window: bool = False,
         is_active_meal: bool = False,
+        metabolic_state: Optional[str] = None,
     ) -> float:
         """
         Calculate the BG-lowering pressure from IOB at horizon.
@@ -244,12 +277,13 @@ class IOBForcingService:
             hour: Current hour
             is_dawn_window: Dawn phenomenon flag
             is_active_meal: Active meal flag
+            metabolic_state: Current metabolic state (affects insulin kinetics)
 
         Returns:
             bg_pressure: Expected BG change (NEGATIVE - insulin lowers BG)
         """
         absorbed = self.predict_absorbed(
-            current_iob, horizon_min, hour, is_dawn_window, is_active_meal
+            current_iob, horizon_min, hour, is_dawn_window, is_active_meal, metabolic_state
         )
 
         # BG pressure = absorbed insulin * ISF * adjustment

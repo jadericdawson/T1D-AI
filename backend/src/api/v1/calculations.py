@@ -21,6 +21,19 @@ from auth import get_current_user
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/calculations", tags=["calculations"])
 
+
+def get_data_user_id(profile_id: str) -> str:
+    """
+    Convert a profile ID to the actual data user ID.
+
+    For 'self' profiles, the profile ID is 'profile_{user_id}' but data
+    is stored with just the raw user_id. This function strips the prefix.
+    """
+    if profile_id.startswith("profile_"):
+        return profile_id[8:]  # Strip "profile_" prefix (8 chars)
+    return profile_id
+
+
 # Service instances
 treatment_repo = TreatmentRepository()
 iob_cob_service = IOBCOBService.from_settings()
@@ -37,24 +50,46 @@ async def validate_user_access(requester_id: str, target_user_id: str) -> bool:
     Check if requester has access to target user's data.
     Access is granted if:
     - requester_id == target_user_id (viewing own data)
+    - requester owns the target profile (managed profile)
     - requester is a parent with target_user_id in their linkedChildIds
     - target_user has shared their data with requester via the sharing system
     """
     try:
-        if requester_id == target_user_id:
+        # Normalize both IDs for comparison
+        # Profile IDs may have 'profile_' prefix but user IDs don't
+        normalized_requester = get_data_user_id(requester_id)
+        normalized_target = get_data_user_id(target_user_id)
+
+        if normalized_requester == normalized_target:
             return True
 
-        # Check if requester is a parent of the target
+        # Check if requester OWNS this profile (managed profile system)
         try:
-            requester = await user_repo.get_by_id(requester_id)
-            if requester and requester.linkedChildIds and target_user_id in requester.linkedChildIds:
+            from database.repositories import ProfileRepository
+            profile_repo = ProfileRepository()
+            profile = await profile_repo.get_by_id(target_user_id, normalized_requester)
+            if profile:
+                logger.info(f"Access granted via profile ownership: {normalized_requester} owns profile {target_user_id}")
                 return True
+        except Exception as e:
+            logger.warning(f"Error checking profile ownership: {e}")
+
+        # Check if requester is a parent of the target (try both normalized and raw IDs)
+        try:
+            requester = await user_repo.get_by_id(normalized_requester)
+            if requester and requester.linkedChildIds:
+                # Check both normalized and raw target IDs
+                if normalized_target in requester.linkedChildIds or target_user_id in requester.linkedChildIds:
+                    return True
         except Exception as e:
             logger.warning(f"Error checking parent-child access: {e}")
 
-        # Check if target user has shared data with requester
+        # Check if target user has shared data with requester (try both ID forms)
         try:
-            share = await sharing_repo.get_share_for_profile(target_user_id, requester_id)
+            share = await sharing_repo.get_share_for_profile(normalized_target, normalized_requester)
+            if not share:
+                # Try with profile_ prefix
+                share = await sharing_repo.get_share_for_profile(target_user_id, requester_id)
             if share and share.isActive:
                 role_str = share.role.value if hasattr(share.role, 'value') else str(share.role)
                 logger.info(f"Access granted via share: {target_user_id} shared with {requester_id} (role: {role_str})")
@@ -171,7 +206,8 @@ async def get_iob(
     target_user_id = user_id if user_id else current_user.id
 
     # Validate access if viewing another user's data
-    if target_user_id != current_user.id:
+    # Must normalize IDs for comparison (profile_xxx vs xxx)
+    if get_data_user_id(target_user_id) != get_data_user_id(current_user.id):
         has_access = await validate_user_access(current_user.id, target_user_id)
         if not has_access:
             raise HTTPException(
@@ -179,15 +215,18 @@ async def get_iob(
                 detail="You don't have permission to view this user's IOB"
             )
 
+    # Normalize for data queries - data is stored with raw user ID, not profile_ prefix
+    data_user_id = get_data_user_id(target_user_id)
+
     try:
         # Get recent treatments
-        treatments = await treatment_repo.get_recent(target_user_id, hours=hours)
+        treatments = await treatment_repo.get_recent(data_user_id, hours=hours)
 
         # Calculate IOB
         iob = iob_cob_service.calculate_iob(treatments)
 
         # Calculate 24h total insulin
-        treatments_24h = await treatment_repo.get_recent(target_user_id, hours=24)
+        treatments_24h = await treatment_repo.get_recent(data_user_id, hours=24)
         total_insulin = sum(t.insulin or 0 for t in treatments_24h)
 
         # Calculate peak IOB in last hour
@@ -224,7 +263,8 @@ async def get_cob(
     target_user_id = user_id if user_id else current_user.id
 
     # Validate access if viewing another user's data
-    if target_user_id != current_user.id:
+    # Must normalize IDs for comparison (profile_xxx vs xxx)
+    if get_data_user_id(target_user_id) != get_data_user_id(current_user.id):
         has_access = await validate_user_access(current_user.id, target_user_id)
         if not has_access:
             raise HTTPException(
@@ -232,12 +272,15 @@ async def get_cob(
                 detail="You don't have permission to view this user's COB"
             )
 
+    # Normalize for data queries - data is stored with raw user ID, not profile_ prefix
+    data_user_id = get_data_user_id(target_user_id)
+
     try:
-        treatments = await treatment_repo.get_recent(target_user_id, hours=hours)
+        treatments = await treatment_repo.get_recent(data_user_id, hours=hours)
         cob = iob_cob_service.calculate_cob(treatments)
 
         # Calculate 24h total carbs
-        treatments_24h = await treatment_repo.get_recent(target_user_id, hours=24)
+        treatments_24h = await treatment_repo.get_recent(data_user_id, hours=24)
         total_carbs = sum(t.carbs or 0 for t in treatments_24h)
 
         # Calculate expected BG impact
@@ -274,7 +317,8 @@ async def get_pob(
     target_user_id = user_id if user_id else current_user.id
 
     # Validate access if viewing another user's data
-    if target_user_id != current_user.id:
+    # Must normalize IDs for comparison (profile_xxx vs xxx)
+    if get_data_user_id(target_user_id) != get_data_user_id(current_user.id):
         has_access = await validate_user_access(current_user.id, target_user_id)
         if not has_access:
             raise HTTPException(
@@ -282,12 +326,15 @@ async def get_pob(
                 detail="You don't have permission to view this user's POB"
             )
 
+    # Normalize for data queries - data is stored with raw user ID, not profile_ prefix
+    data_user_id = get_data_user_id(target_user_id)
+
     try:
-        treatments = await treatment_repo.get_recent(target_user_id, hours=hours)
+        treatments = await treatment_repo.get_recent(data_user_id, hours=hours)
         pob = iob_cob_service.calculate_pob(treatments)
 
         # Calculate 24h total protein
-        treatments_24h = await treatment_repo.get_recent(target_user_id, hours=24)
+        treatments_24h = await treatment_repo.get_recent(data_user_id, hours=24)
         total_protein = sum(getattr(t, 'protein', 0) or 0 for t in treatments_24h)
 
         # Calculate expected BG impact (protein raises BG ~50% as much as carbs)
@@ -617,7 +664,8 @@ async def get_calculations_summary(
     target_user_id = user_id if user_id else current_user.id
 
     # Validate access if viewing another user's data
-    if target_user_id != current_user.id:
+    # Must normalize IDs for comparison (profile_xxx vs xxx)
+    if get_data_user_id(target_user_id) != get_data_user_id(current_user.id):
         has_access = await validate_user_access(current_user.id, target_user_id)
         if not has_access:
             raise HTTPException(
@@ -625,8 +673,11 @@ async def get_calculations_summary(
                 detail="You don't have permission to view this user's calculations"
             )
 
+    # Normalize for data queries - data is stored with raw user ID, not profile_ prefix
+    data_user_id = get_data_user_id(target_user_id)
+
     try:
-        treatments = await treatment_repo.get_recent(target_user_id, hours=6)
+        treatments = await treatment_repo.get_recent(data_user_id, hours=6)
 
         iob = iob_cob_service.calculate_iob(treatments)
         cob = iob_cob_service.calculate_cob(treatments)
@@ -634,7 +685,7 @@ async def get_calculations_summary(
 
         # Get all effective metabolic parameters with illness detection
         params = await metabolic_params_service.get_all_params(
-            user_id=target_user_id,
+            user_id=data_user_id,
             is_fasting=(cob == 0 and pob == 0),
             include_short_term=True
         )

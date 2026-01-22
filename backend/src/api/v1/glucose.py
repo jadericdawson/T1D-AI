@@ -27,6 +27,22 @@ from auth.routes import get_current_user
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
+def get_data_user_id(profile_id: str) -> str:
+    """
+    Convert a profile ID to the actual data user ID.
+
+    For 'self' profiles, the profile ID is 'profile_{user_id}' but data
+    is stored with just the raw user_id. This function strips the prefix.
+
+    For non-self profiles (like children), the profile ID is a regular UUID
+    that should be used as-is.
+    """
+    if profile_id.startswith("profile_"):
+        return profile_id[8:]  # Strip "profile_" prefix (8 chars)
+    return profile_id
+
+
 # Repository instances
 glucose_repo = GlucoseRepository()
 treatment_repo = TreatmentRepository()
@@ -81,18 +97,51 @@ async def validate_user_access(requester_id: str, target_user_id: str) -> bool:
     Check if requester has access to target user's data.
     Access is granted if:
     - requester_id == target_user_id (viewing own data)
+    - requester owns the target profile (managed profile)
     - requester is a parent with target_user_id in their linkedChildIds
     - target_user has shared their data with requester via the sharing system
     """
     try:
-        if requester_id == target_user_id:
+        # Normalize both IDs for comparison
+        # Profile IDs may have 'profile_' prefix but user IDs don't
+        normalized_requester = get_data_user_id(requester_id)
+        normalized_target = get_data_user_id(target_user_id)
+
+        logger.info(f"validate_user_access: requester_id={requester_id}, target_user_id={target_user_id}")
+        logger.info(f"validate_user_access: normalized_requester={normalized_requester}, normalized_target={normalized_target}")
+
+        if normalized_requester == normalized_target:
+            logger.info(f"Access granted: normalized IDs match")
             return True
+
+        # Also check raw IDs in case one has prefix and one doesn't
+        if requester_id == target_user_id:
+            logger.info(f"Access granted: raw IDs match")
+            return True
+
+        # Check if requester OWNS this profile (managed profile system)
+        # This handles cases where a parent creates a profile for their child
+        try:
+            from database.repositories import ProfileRepository
+            profile_repo = ProfileRepository()
+            # Check if target_user_id is a profile owned by requester
+            logger.info(f"Checking profile ownership: profile_id={target_user_id}, account_id={normalized_requester}")
+            profile = await profile_repo.get_by_id(target_user_id, normalized_requester)
+            if profile:
+                logger.info(f"Access granted via profile ownership: {normalized_requester} owns profile {target_user_id}")
+                return True
+            else:
+                logger.info(f"Profile not found: profile_id={target_user_id}, account_id={normalized_requester}")
+        except Exception as e:
+            logger.warning(f"Error checking profile ownership: {e}")
 
         # Check if requester is a parent of the target
         try:
             requester = await user_repo.get_by_id(requester_id)
-            if requester and requester.linkedChildIds and target_user_id in requester.linkedChildIds:
-                return True
+            if requester and requester.linkedChildIds:
+                # Check both normalized and raw target IDs
+                if target_user_id in requester.linkedChildIds or normalized_target in requester.linkedChildIds:
+                    return True
         except Exception as e:
             logger.warning(f"Error checking parent-child access: {e}")
 
@@ -101,12 +150,20 @@ async def validate_user_access(requester_id: str, target_user_id: str) -> bool:
         # 1. Direct share: ownerId = target_user_id (user shares their own data)
         # 2. Profile share: profileId = target_user_id (parent shares child's data)
         try:
+            # Try with original target_user_id first (for profile shares)
             share = await sharing_repo.get_share_for_profile(target_user_id, requester_id)
             if share and share.isActive:
                 # Handle role as enum or string
                 role_str = share.role.value if hasattr(share.role, 'value') else str(share.role)
                 logger.info(f"Access granted via share: {target_user_id} shared with {requester_id} (role: {role_str})")
                 return True
+            # Also try with normalized target (for direct user shares)
+            if normalized_target != target_user_id:
+                share = await sharing_repo.get_share_for_profile(normalized_target, requester_id)
+                if share and share.isActive:
+                    role_str = share.role.value if hasattr(share.role, 'value') else str(share.role)
+                    logger.info(f"Access granted via share: {normalized_target} shared with {requester_id} (role: {role_str})")
+                    return True
         except Exception as e:
             logger.warning(f"Error checking share access: {e}")
 
@@ -150,6 +207,11 @@ async def get_current_glucose(
         if not has_access:
             raise HTTPException(status_code=403, detail="Not authorized to view this user's data")
 
+        # Normalize profile ID to data user ID
+        # For 'self' profiles, strip the 'profile_' prefix (data stored without it)
+        data_user_id = get_data_user_id(user_id)
+        logger.debug(f"Normalized user_id {user_id} -> data_user_id {data_user_id}")
+
         # Try Dexcom first for freshest data - BUT ONLY if this user has Dexcom configured
         # CRITICAL: The global Dexcom service has hardcoded credentials for one user (Emrys)
         # We must NOT return Dexcom data for users who don't have it set up
@@ -157,28 +219,28 @@ async def get_current_glucose(
         dexcom_svc = get_dexcom_service()
 
         if dexcom_svc:
-            # Check if this user has any existing Dexcom-sourced readings in the database
-            # This is a proxy for "user has Dexcom configured"
-            # Without this check, ALL users would see Emrys' Dexcom data!
+            # Check if user has CGM data (dexcom OR gluroo source)
+            # Dexcom is PRIMARY source, Gluroo is backup
             try:
-                recent_dexcom_readings = await glucose_repo.get_recent_by_source(user_id, "dexcom", hours=48)
-                user_has_dexcom = len(recent_dexcom_readings) > 0
+                recent_dexcom = await glucose_repo.get_recent_by_source(data_user_id, "dexcom", hours=48)
+                recent_gluroo = await glucose_repo.get_recent_by_source(data_user_id, "gluroo", hours=48)
+                user_has_cgm = len(recent_dexcom) > 0 or len(recent_gluroo) > 0
 
-                if user_has_dexcom:
+                if user_has_cgm:
                     try:
                         dexcom_reading = await dexcom_svc.get_latest_reading_async()
                         if dexcom_reading:
-                            latest = dexcom_to_glucose_reading(dexcom_reading, user_id)
-                            logger.info(f"Got fresh reading from Dexcom: {latest.value} mg/dL")
+                            latest = dexcom_to_glucose_reading(dexcom_reading, data_user_id)
+                            logger.info(f"Got fresh reading from Dexcom (PRIMARY): {latest.value} mg/dL")
                     except Exception as e:
-                        logger.warning(f"Dexcom fetch failed, falling back to Gluroo: {e}")
+                        logger.warning(f"Dexcom fetch failed, will use Gluroo backup: {e}")
                 else:
-                    logger.debug(f"User {user_id} has no Dexcom data, skipping Dexcom fetch")
+                    logger.debug(f"User {user_id} has no CGM data, skipping Dexcom fetch")
             except Exception as e:
-                logger.warning(f"Error checking Dexcom status for user: {e}")
+                logger.warning(f"Error checking CGM status for user: {e}")
 
         # Fall back to Gluroo/database if Dexcom unavailable or stale
-        gluroo_latest = await glucose_repo.get_latest(user_id)
+        gluroo_latest = await glucose_repo.get_latest(data_user_id)
 
         if gluroo_latest:
             # Use Gluroo if no Dexcom data, or if Gluroo is actually fresher
@@ -196,13 +258,13 @@ async def get_current_glucose(
 
         # Get recent treatments for IOB/COB calculation
         # Fetch 30 hours to cover 24hr chart view + 6hr insulin action window
-        treatments = await treatment_repo.get_recent(user_id, hours=30)
+        treatments = await treatment_repo.get_recent(data_user_id, hours=30)
 
         # Load user's learned absorption profile for personalized activity curves
         # This replaces hardcoded peak times (75/45/180 min) with learned values
         absorption_profile: Optional[UserAbsorptionProfile] = None
         try:
-            absorption_profile = await absorption_profile_repo.get(user_id)
+            absorption_profile = await absorption_profile_repo.get(data_user_id)
             if absorption_profile and absorption_profile.confidence > 0.3:
                 logger.info(f"Using learned absorption profile: insulin_peak={absorption_profile.insulinPeakMin}min, "
                            f"carb_peak={absorption_profile.carbPeakMin}min, protein_peak={absorption_profile.proteinPeakMin}min "
@@ -230,7 +292,7 @@ async def get_current_glucose(
         # Use 24 hours to support full chart time range (1hr, 3hr, 6hr, 12hr, 24hr)
         # This allows historical IOB/COB and BG Pressure lines to span the entire viewable period
         start_time = datetime.utcnow() - timedelta(hours=24)
-        glucose_history = await glucose_repo.get_history(user_id, start_time)
+        glucose_history = await glucose_repo.get_history(data_user_id, start_time)
 
         # Convert trend to int for prediction
         trend_val = 0
@@ -265,7 +327,7 @@ async def get_current_glucose(
             # Determine if fasting based on recent COB
             is_fasting = cob < 5
             effective_isf = await metabolic_params_service.get_effective_isf(
-                user_id, is_fasting=is_fasting, include_short_term=True
+                data_user_id, is_fasting=is_fasting, include_short_term=True
             )
             isf = effective_isf.value
             isf_deviation = effective_isf.deviation_percent
@@ -280,7 +342,7 @@ async def get_current_glucose(
 
             if effective_isf.source == "default":
                 # Fall back to user settings if no learned data
-                user = await user_repo.get_by_id(user_id)
+                user = await user_repo.get_by_id(data_user_id)
                 if user and user.settings and user.settings.insulinSensitivity != 50.0:
                     isf = user.settings.insulinSensitivity
                     logger.info(f"Using user settings ISF: {isf:.1f}")
@@ -329,7 +391,7 @@ async def get_current_glucose(
         )
 
         # Calculate IOB/COB effect curve for visualization
-        user = await user_repo.get_by_id(user_id)
+        user = await user_repo.get_by_id(data_user_id)
         user_icr = user.settings.carbRatio if user else 10.0
 
         # Calculate effect curve for IOB/COB decay visualization
@@ -370,6 +432,54 @@ async def get_current_glucose(
                     upper=tft_pred.upper,
                     tftDelta=tft_pred.tft_delta  # TFT modifier delta (physics + delta = final)
                 ))
+
+        # INCORPORATE TFT DELTA INTO EFFECT CURVE (Predicted BG line)
+        # The TFT model provides delta adjustments at specific horizons (30, 45, 60 min)
+        # Interpolate these deltas across all effect curve time points
+        if tft_predictions and effect_curve:
+            # Build horizon -> delta mapping
+            tft_deltas = {p.horizon: p.tftDelta for p in tft_predictions if p.tftDelta is not None}
+
+            if tft_deltas:
+                # Get sorted horizons for interpolation
+                sorted_horizons = sorted(tft_deltas.keys())
+                logger.info(f"TFT delta adjustment: horizons={sorted_horizons}, deltas={[tft_deltas[h] for h in sorted_horizons]}")
+
+                # Apply interpolated delta to each effect curve point's expectedBg
+                for point in effect_curve:
+                    if point.expectedBg is None:
+                        continue
+
+                    t = point.minutesAhead
+
+                    # Interpolate delta for this time point
+                    if t <= 0:
+                        # Before first horizon: no delta
+                        delta = 0.0
+                    elif t < sorted_horizons[0]:
+                        # Before first TFT prediction: linear ramp from 0
+                        delta = tft_deltas[sorted_horizons[0]] * (t / sorted_horizons[0])
+                    elif t >= sorted_horizons[-1]:
+                        # After last TFT prediction: use last delta (constant)
+                        delta = tft_deltas[sorted_horizons[-1]]
+                    else:
+                        # Between TFT predictions: linear interpolation
+                        for i in range(len(sorted_horizons) - 1):
+                            h1, h2 = sorted_horizons[i], sorted_horizons[i + 1]
+                            if h1 <= t < h2:
+                                d1, d2 = tft_deltas[h1], tft_deltas[h2]
+                                frac = (t - h1) / (h2 - h1)
+                                delta = d1 + (d2 - d1) * frac
+                                break
+                        else:
+                            delta = 0.0
+
+                    # Apply delta to expectedBg
+                    if delta != 0.0:
+                        adjusted_bg = max(40, min(400, point.expectedBg + delta))
+                        point.expectedBg = round(adjusted_bg, 0)
+
+                logger.info(f"Applied TFT delta to {len(effect_curve)} effect curve points")
 
         # Calculate historical IOB/COB/POB and BG pressure at each glucose reading timestamp
         # This provides continuous curves for plotting:
@@ -513,11 +623,15 @@ async def get_glucose_history(
         has_access = await validate_user_access(current_user.id, user_id)
         if not has_access:
             raise HTTPException(status_code=403, detail="Not authorized to view this user's data")
+
+        # Normalize profile ID to data user ID
+        data_user_id = get_data_user_id(user_id)
+
         start_time = datetime.utcnow() - timedelta(hours=hours)
         end_time = datetime.utcnow()
 
         readings = await glucose_repo.get_history(
-            user_id=user_id,
+            user_id=data_user_id,
             start_time=start_time,
             end_time=end_time,
             limit=limit
@@ -558,8 +672,12 @@ async def get_range_stats(
         has_access = await validate_user_access(current_user.id, user_id)
         if not has_access:
             raise HTTPException(status_code=403, detail="Not authorized to view this user's data")
+
+        # Normalize profile ID to data user ID
+        data_user_id = get_data_user_id(user_id)
+
         start_time = datetime.utcnow() - timedelta(hours=hours)
-        readings = await glucose_repo.get_history(user_id, start_time)
+        readings = await glucose_repo.get_history(data_user_id, start_time)
 
         if not readings:
             return {

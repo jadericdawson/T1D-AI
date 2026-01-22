@@ -2,7 +2,8 @@
  * T1D-AI Dashboard
  * Main glucose monitoring dashboard with real-time updates
  */
-import { useState, useEffect, lazy, Suspense } from 'react'
+import { useState, useEffect, useRef, lazy, Suspense } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import {
   Activity, Clock, RefreshCw, Bell, Sparkles,
@@ -55,7 +56,7 @@ import { CurrentGlucose } from '@/components/glucose/CurrentGlucose'
 const PlotlyGlucoseChart = lazy(() => import('@/components/glucose/PlotlyGlucoseChart').then(m => ({ default: m.PlotlyGlucoseChart })))
 import { ChartLegend } from '@/components/glucose/ChartLegend'
 import { PredictionsCard } from '@/components/glucose/Predictions'
-import { IOBCard, COBCard, POBCard, ISFGaugeCard, ICRGaugeCard, DoseCard, PIRGaugeCard, ProteinInsulinCard, WarningCard } from '@/components/metrics/MetricCard'
+import { IOBCard, COBCard, POBCard, ISFGaugeCard, ICRGaugeCard, PIRGaugeCard, ProteinInsulinCard, WarningCard, RecommendationCard, FoodSuggestion } from '@/components/metrics/MetricCard'
 import MetabolicStatePanel from '@/components/metrics/MetabolicStatePanel'
 import { LogCarbsModal, LogInsulinModal } from '@/components/treatments/TreatmentModal'
 import { UserMenu } from '@/components/layout/UserMenu'
@@ -122,6 +123,9 @@ export default function Dashboard() {
   } | null>(null)
   const [deletingTreatmentId, setDeletingTreatmentId] = useState<string | null>(null)
 
+  // WebSocket data state - needs to be declared early for cache clearing effect
+  const [latestWsData, setLatestWsData] = useState<any>(null)
+
   // AI Chat state with conversation history (persists for browser session)
   const [chatQuestion, setChatQuestion] = useState('')
   const [chatHistory, setChatHistory] = useState<Array<{
@@ -149,14 +153,59 @@ export default function Dashboard() {
   }, [])
 
   // Auth store - get effective userId (for profile-based access)
-  const getEffectiveUserId = useAuthStore(state => state.getEffectiveUserId)
-  const getActiveProfile = useAuthStore(state => state.getActiveProfile)
-  const userId = getEffectiveUserId()
-  const activeProfile = getActiveProfile()
+  // IMPORTANT: Select viewingUserId directly so Zustand detects changes when profile switches
+  const viewingUserId = useAuthStore(state => state.viewingUserId)
+  const user = useAuthStore(state => state.user)
+  const activeProfileId = useAuthStore(state => state.activeProfileId)
+  const managedProfiles = useAuthStore(state => state.managedProfiles)
+
+  // Compute effective userId - MUST match getEffectiveProfileId logic for managed profiles
+  // Priority: viewingUserId (shared) > activeProfileId (managed child) > user?.id (self)
+  const userId = viewingUserId || activeProfileId || user?.id || ''
+
+  // Compute active profile (same logic as getActiveProfile)
+  const activeProfile = managedProfiles.find((p: { id: string }) => p.id === activeProfileId) || null
 
   // NOTE: For legacy profiles (profile_{userId}), data exists without formal data sources
   // We allow dashboard access regardless of data source configuration - empty states handle missing data
   void activeProfile?.id?.startsWith('profile_')
+
+  // Query client for cache management
+  const queryClient = useQueryClient()
+  const prevUserIdRef = useRef<string | null>(null)
+
+  // Track if profile switch needs full refresh (set by cache clearing effect)
+  const needsRefreshRef = useRef(false)
+  // Track if we're in the middle of a profile switch - ignore WebSocket messages during this time
+  const isProfileSwitchingRef = useRef(false)
+
+  // Clear cache when userId changes to prevent data leaks between profiles
+  useEffect(() => {
+    if (prevUserIdRef.current && prevUserIdRef.current !== userId) {
+      // User switched profiles - clear all cached data and force refetch
+      console.log(`[Dashboard] Profile switching from ${prevUserIdRef.current} to ${userId}`)
+
+      // IMMEDIATELY set profile switching flag to ignore incoming WebSocket messages
+      isProfileSwitchingRef.current = true
+
+      // Clear WebSocket state first to prevent stale data
+      setLatestWsData(null)
+
+      // Remove all queries for the OLD userId to prevent data leaks
+      queryClient.removeQueries({ queryKey: ['glucose'] })
+      queryClient.removeQueries({ queryKey: ['treatments'] })
+      queryClient.removeQueries({ queryKey: ['predictions'] })
+      queryClient.removeQueries({ queryKey: ['insights'] })
+      queryClient.removeQueries({ queryKey: ['training'] })
+      queryClient.removeQueries({ queryKey: ['calculations'] })
+
+      // Mark that we need to force refresh the WebSocket connection
+      needsRefreshRef.current = true
+
+      console.log(`[Dashboard] Cache cleared for profile switch to ${userId}`)
+    }
+    prevUserIdRef.current = userId
+  }, [userId, queryClient])
 
   // Prefetch all time ranges on mount for instant switching
   const { prefetchAll } = usePrefetchAllTimeRanges(userId)
@@ -224,18 +273,41 @@ export default function Dashboard() {
   }
 
   // WebSocket for real-time updates with Gluroo sync notifications
-  const [latestWsData, setLatestWsData] = useState<any>(null)
-  const { isConnected, connectionStatus, forceRefreshAllData } = useGlucoseWebSocket({
+  const { isConnected, connectionStatus, forceRefreshAllData, forceReconnect } = useGlucoseWebSocket({
     userId,
     interval: 60,
     onGlurooSync: handleGlurooSync,
     onMessage: (data) => {
+      // IMPORTANT: Ignore WebSocket messages during profile switch to prevent data leaks
+      if (isProfileSwitchingRef.current) {
+        console.log('[Dashboard] Ignoring WebSocket message during profile switch')
+        return
+      }
       if (data.type === 'glucose_update' && data.data) {
         setLatestWsData(data.data)
       }
     },
   })
   const latestData = latestWsData
+
+  // Force reconnect WebSocket after profile switch to ensure fresh connection with new userId
+  useEffect(() => {
+    if (needsRefreshRef.current && userId) {
+      console.log(`[Dashboard] Forcing WebSocket reconnect for new userId: ${userId}`)
+      needsRefreshRef.current = false
+      // Small delay to ensure cache clearing is complete
+      const timer = setTimeout(() => {
+        forceReconnect()
+        // Clear profile switching flag after WebSocket has time to reconnect
+        // This allows the new connection's messages to be processed
+        setTimeout(() => {
+          isProfileSwitchingRef.current = false
+          console.log(`[Dashboard] Profile switch complete, accepting WebSocket messages for ${userId}`)
+        }, 500)
+      }, 100)
+      return () => clearTimeout(timer)
+    }
+  }, [userId, forceReconnect])
 
   // Handle force refresh - reconnects WebSocket and refetches all data
   const handleForceRefresh = async () => {
@@ -286,6 +358,14 @@ export default function Dashboard() {
   const isf = latestData?.metrics?.isf ?? currentData?.metrics?.isf ?? 50
   const recommendedDose = currentData?.metrics?.recommendedDose ?? 0
 
+  // Food recommendation data (when BG predicted low)
+  const actionType = (latestData?.metrics?.actionType ?? currentData?.metrics?.actionType ?? 'none') as 'insulin' | 'food' | 'none'
+  const recommendedCarbs = latestData?.metrics?.recommendedCarbs ?? currentData?.metrics?.recommendedCarbs ?? 0
+  const foodSuggestions: FoodSuggestion[] = (latestData?.metrics?.foodSuggestions ?? currentData?.metrics?.foodSuggestions ?? []) as FoodSuggestion[]
+  const predictedBgWithoutAction = latestData?.metrics?.predictedBgWithoutAction ?? currentData?.metrics?.predictedBgWithoutAction ?? 0
+  const predictedBgWithAction = latestData?.metrics?.predictedBgWithAction ?? currentData?.metrics?.predictedBgWithAction ?? 0
+  const recommendationReasoning = latestData?.metrics?.recommendationReasoning ?? currentData?.metrics?.recommendationReasoning ?? ''
+
   // Protein insulin with time-based decay (LATER → NOW as time passes)
   // Backend calculates this with decay factor based on time since protein meal
   // Also clears protein NOW if no correction is needed (to prevent lows)
@@ -311,6 +391,11 @@ export default function Dashboard() {
     upper: p.upper,
   }))
 
+  // Track if we have real glucose data - used to show dashes in gauges when no data
+  const hasGlucoseData = currentBg !== undefined && currentBg !== null
+  // Loading flag for metric cards - show dashes when loading OR no data
+  const metricsLoading = (isLoadingCurrent && !latestData?.metrics) || !hasGlucoseData
+
   // Real-time AI insight - updates when BG/IOB/COB/ISF/ICR/PIR/Dose/BgPressure changes
   const { data: realtimeInsight, isLoading: isLoadingInsight } = useRealtimeInsight({
     currentBg,
@@ -329,7 +414,8 @@ export default function Dashboard() {
 
   // Format treatments for display (include all enrichment data)
   // Deduplicate: when a treatment is edited, prefer the one with more complete notes
-  const deduplicatedTreatments = (treatmentsData ?? []).reduce((acc, t) => {
+  const safeTreatmentsData = Array.isArray(treatmentsData) ? treatmentsData : []
+  const deduplicatedTreatments = safeTreatmentsData.reduce((acc, t) => {
     // Create a key based on timestamp (to minute) + type + value
     const timeKey = new Date(t.timestamp).toISOString().slice(0, 16) // YYYY-MM-DDTHH:MM
     const value = t.type === 'insulin' ? t.insulin : t.carbs
@@ -386,7 +472,7 @@ export default function Dashboard() {
 
   // Format treatments for chart - handle all treatment types
   // Include notes and isLiquid for food emoji selection
-  const chartTreatments = (treatmentsData ?? []).map((t) => {
+  const chartTreatments = safeTreatmentsData.map((t) => {
     // Normalize type: 'insulin' and 'Correction Bolus' → 'insulin'
     //                 'carbs' and 'Carb Correction' → 'carbs'
     const isInsulin = t.type === 'insulin' || t.type === 'Correction Bolus'
@@ -557,35 +643,38 @@ export default function Dashboard() {
 
           {/* Metrics Grid - IOB, COB, POB, ISF */}
           <motion.div variants={staggerItem} className="grid grid-cols-2 gap-4">
-            <IOBCard value={iob} isLoading={isLoadingCurrent && !latestData?.metrics} />
-            <COBCard value={cob} isLoading={isLoadingCurrent && !latestData?.metrics} />
-            <POBCard value={pob} isLoading={isLoadingCurrent && !latestData?.metrics} />
+            <IOBCard value={iob} isLoading={metricsLoading} />
+            <COBCard value={cob} isLoading={metricsLoading} />
+            <POBCard value={pob} isLoading={metricsLoading} />
             <ISFGaugeCard
               baselineIsf={learnedRatios.isf.value}
               currentIsf={learnedRatios.isf.currentIsf}
               deviation={learnedRatios.isf.deviation}
               source={learnedRatios.isf.source as 'learned' | 'default'}
-              isLoading={learnedRatios.isLoading}
+              isLoading={metricsLoading || learnedRatios.isLoading}
               confidence={learnedRatios.isf.currentIsfConfidence ?? learnedRatios.isf.confidence}
             />
           </motion.div>
 
-          {/* Dose Cards - Correction+Carbs and Protein */}
+          {/* Action Card - Shows Dose OR Food recommendation */}
           <motion.div variants={staggerItem} className="grid grid-cols-2 gap-4">
-            <DoseCard
-              value={recommendedDose}
+            <RecommendationCard
+              actionType={actionType}
+              recommendedDose={recommendedDose}
+              recommendedCarbs={recommendedCarbs}
+              foodSuggestions={foodSuggestions}
+              predictedBgWithoutAction={predictedBgWithoutAction}
+              predictedBgWithAction={predictedBgWithAction}
+              reasoning={recommendationReasoning}
               proteinDoseNow={proteinInsulinNow}
               proteinDoseLater={proteinInsulinLater}
-              tooltip={proteinInsulinNow > 0
-                ? `Dose to 100: ${recommendedDose.toFixed(1)}U correction + ${proteinInsulinNow.toFixed(1)}U protein NOW`
-                : `Correction dose to reach 100 mg/dL`}
-              isLoading={isLoadingCurrent && !latestData?.metrics}
+              isLoading={metricsLoading}
             />
             <ProteinInsulinCard
               now={proteinInsulinNow}
               later={proteinInsulinLater}
               pob={pob}
-              isLoading={isLoadingCurrent && !latestData?.metrics}
+              isLoading={metricsLoading}
             />
           </motion.div>
 
@@ -597,7 +686,7 @@ export default function Dashboard() {
               deviation={learnedRatios.icr.deviation}
               source={learnedRatios.icr.source as 'learned' | 'default'}
               confidence={learnedRatios.icr.currentIcrConfidence ?? learnedRatios.icr.confidence}
-              isLoading={learnedRatios.isLoading}
+              isLoading={metricsLoading || learnedRatios.isLoading}
             />
             <PIRGaugeCard
               baselinePir={learnedRatios.pir.value}
@@ -607,7 +696,7 @@ export default function Dashboard() {
               confidence={learnedRatios.pir.currentPirConfidence ?? learnedRatios.pir.confidence}
               onsetMin={learnedRatios.pir.onsetMin ?? undefined}
               peakMin={learnedRatios.pir.peakMin ?? undefined}
-              isLoading={learnedRatios.isLoading}
+              isLoading={metricsLoading || learnedRatios.isLoading}
             />
           </motion.div>
 

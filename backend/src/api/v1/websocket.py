@@ -23,6 +23,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def get_data_user_id(profile_id: str) -> str:
+    """
+    Convert a profile ID to the actual data user ID.
+
+    For 'self' profiles, the profile ID is 'profile_{user_id}' but data
+    is stored with just the raw user_id. This function strips the prefix.
+    """
+    if profile_id.startswith("profile_"):
+        return profile_id[8:]  # Strip "profile_" prefix (8 chars)
+    return profile_id
+
+
 class ConnectionManager:
     """
     Manages WebSocket connections for real-time glucose updates.
@@ -135,21 +147,38 @@ async def get_glucose_update(user_id: str) -> dict:
     Tries Dexcom first for freshest data, falls back to database.
     """
     try:
+        # Normalize profile ID to data user ID
+        # For 'self' profiles, strip the 'profile_' prefix (data stored without it)
+        data_user_id = get_data_user_id(user_id)
+        logger.debug(f"WebSocket: Normalized user_id {user_id} -> data_user_id {data_user_id}")
+
         # Try Dexcom first for freshest data
         latest: GlucoseReading | None = None
         dexcom_svc = get_dexcom_service()
 
         if dexcom_svc:
+            # Check if user has CGM data (dexcom OR gluroo source)
+            # Dexcom is PRIMARY source, Gluroo is backup
             try:
-                dexcom_reading = await dexcom_svc.get_latest_reading_async()
-                if dexcom_reading:
-                    latest = dexcom_to_glucose_reading(dexcom_reading, user_id)
-                    logger.info(f"WebSocket: Got fresh reading from Dexcom: {latest.value} mg/dL")
+                recent_dexcom = await glucose_repo.get_recent_by_source(data_user_id, "dexcom", hours=48)
+                recent_gluroo = await glucose_repo.get_recent_by_source(data_user_id, "gluroo", hours=48)
+                user_has_cgm = len(recent_dexcom) > 0 or len(recent_gluroo) > 0
+
+                if user_has_cgm:
+                    try:
+                        dexcom_reading = await dexcom_svc.get_latest_reading_async()
+                        if dexcom_reading:
+                            latest = dexcom_to_glucose_reading(dexcom_reading, data_user_id)
+                            logger.info(f"WebSocket: Got fresh reading from Dexcom (PRIMARY): {latest.value} mg/dL")
+                    except Exception as e:
+                        logger.warning(f"WebSocket: Dexcom fetch failed, will use Gluroo backup: {e}")
+                else:
+                    logger.debug(f"WebSocket: User {user_id} has no CGM data, skipping Dexcom fetch")
             except Exception as e:
-                logger.warning(f"WebSocket: Dexcom fetch failed: {e}")
+                logger.warning(f"WebSocket: Error checking CGM status for user: {e}")
 
         # Fall back to database if Dexcom unavailable
-        db_latest = await glucose_repo.get_latest(user_id)
+        db_latest = await glucose_repo.get_latest(data_user_id)
 
         if db_latest:
             if not latest:
@@ -163,13 +192,9 @@ async def get_glucose_update(user_id: str) -> dict:
             return {"type": "error", "message": "No glucose data"}
 
         # Get recent treatments
-        treatments = await treatment_repo.get_recent(user_id, hours=6)
+        treatments = await treatment_repo.get_recent(data_user_id, hours=6)
 
-        # Calculate IOB/COB
-        iob = iob_cob_service.calculate_iob(treatments)
-        cob = iob_cob_service.calculate_cob(treatments)
-
-        # Get predictions
+        # Get predictions first to get ISF
         settings = get_settings()
         models_dir = None
         for path in [Path("./models"), Path("./data/models"), Path("/app/models")]:
@@ -181,7 +206,7 @@ async def get_glucose_update(user_id: str) -> dict:
 
         # Get glucose history for LSTM
         start_time = datetime.utcnow() - timedelta(minutes=120)
-        glucose_history = await glucose_repo.get_history(user_id, start_time)
+        glucose_history = await glucose_repo.get_history(data_user_id, start_time)
 
         # Convert trend
         trend_val = 0
@@ -192,6 +217,10 @@ async def get_glucose_update(user_id: str) -> dict:
             }
             trend_val = trend_map.get(str(latest.trend), 0)
 
+        # Calculate IOB/COB first for predictions
+        iob = iob_cob_service.calculate_iob(treatments)
+        cob = iob_cob_service.calculate_cob(treatments)
+
         # Generate predictions
         prediction = pred_service.predict(
             current_bg=float(latest.value),
@@ -200,6 +229,17 @@ async def get_glucose_update(user_id: str) -> dict:
             cob=cob,
             glucose_history=[r.model_dump() for r in glucose_history],
             treatments=[t.model_dump() for t in treatments]
+        )
+
+        # Get PIR from settings (default 25g protein per unit)
+        pir = getattr(settings, 'default_pir', 25.0)
+
+        # Calculate complete metrics using get_current_metrics (includes POB, dose, protein dose)
+        metrics = iob_cob_service.get_current_metrics(
+            current_bg=latest.value,
+            treatments=treatments,
+            isf=prediction.isf,
+            pir=pir
         )
 
         # Build response
@@ -217,9 +257,30 @@ async def get_glucose_update(user_id: str) -> dict:
                     "horizons": [5, 10, 15]
                 },
                 "metrics": {
-                    "iob": round(iob, 2),
-                    "cob": round(cob, 1),
-                    "isf": round(prediction.isf, 1)
+                    "iob": round(metrics.iob, 2),
+                    "cob": round(metrics.cob, 1),
+                    "pob": round(metrics.pob, 1),
+                    "isf": round(metrics.isf, 1),
+                    "recommendedDose": round(metrics.recommendedDose, 2),
+                    "proteinDoseNow": round(metrics.proteinDoseNow, 2),
+                    "proteinDoseLater": round(metrics.proteinDoseLater, 2),
+                    "effectiveBg": metrics.effectiveBg,
+                    # Food recommendation fields
+                    "actionType": metrics.actionType,
+                    "recommendedCarbs": round(metrics.recommendedCarbs, 0),
+                    "foodSuggestions": [
+                        {
+                            "name": f.name,
+                            "carbs": f.carbs,
+                            "typical_portion": f.typical_portion,
+                            "glycemic_index": f.glycemic_index,
+                            "times_eaten": f.times_eaten
+                        }
+                        for f in metrics.foodSuggestions
+                    ],
+                    "predictedBgWithoutAction": metrics.predictedBgWithoutAction,
+                    "predictedBgWithAction": metrics.predictedBgWithAction,
+                    "recommendationReasoning": metrics.recommendationReasoning,
                 },
                 "modelAvailable": pred_service.lstm_available
             },

@@ -25,6 +25,19 @@ import logging
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/predictions", tags=["predictions"])
 
+
+def get_data_user_id(profile_id: str) -> str:
+    """
+    Convert a profile ID to the actual data user ID.
+
+    For 'self' profiles, the profile ID is 'profile_{user_id}' but data
+    is stored with just the raw user_id. This function strips the prefix.
+    """
+    if profile_id.startswith("profile_"):
+        return profile_id[8:]  # Strip "profile_" prefix (8 chars)
+    return profile_id
+
+
 # Repository instances for access validation
 sharing_repo = SharingRepository()
 user_repo = UserRepository()
@@ -35,20 +48,43 @@ async def validate_user_access(requester_id: str, target_user_id: str) -> bool:
     Check if requester has access to target user's data.
     Access is granted if:
     - requester_id == target_user_id (viewing own data)
+    - requester owns the target profile (managed profile)
     - requester is a parent with target_user_id in their linkedChildIds
     - target_user has shared their data with requester via the sharing system
 
     Returns False on any error to fail safely.
     """
     try:
+        # Normalize both IDs for comparison
+        # Profile IDs may have 'profile_' prefix but user IDs don't
+        normalized_requester = get_data_user_id(requester_id)
+        normalized_target = get_data_user_id(target_user_id)
+
+        if normalized_requester == normalized_target:
+            return True
+
+        # Also check raw IDs in case one has prefix and one doesn't
         if requester_id == target_user_id:
             return True
+
+        # Check if requester OWNS this profile (managed profile system)
+        try:
+            from database.repositories import ProfileRepository
+            profile_repo = ProfileRepository()
+            profile = await profile_repo.get_by_id(target_user_id, normalized_requester)
+            if profile:
+                logger.info(f"Access granted via profile ownership: {normalized_requester} owns profile {target_user_id}")
+                return True
+        except Exception as e:
+            logger.warning(f"Error checking profile ownership: {e}")
 
         # Check if requester is a parent of the target
         try:
             requester = await user_repo.get_by_id(requester_id)
-            if requester and requester.linkedChildIds and target_user_id in requester.linkedChildIds:
-                return True
+            if requester and requester.linkedChildIds:
+                # Check both normalized and raw target IDs
+                if target_user_id in requester.linkedChildIds or normalized_target in requester.linkedChildIds:
+                    return True
         except Exception as e:
             logger.warning(f"Error checking parent-child access: {e}")
 
@@ -57,11 +93,19 @@ async def validate_user_access(requester_id: str, target_user_id: str) -> bool:
         # 1. Direct share: ownerId = target_user_id (user shares their own data)
         # 2. Profile share: profileId = target_user_id (parent shares child's data)
         try:
+            # Try with original target_user_id first (for profile shares)
             share = await sharing_repo.get_share_for_profile(target_user_id, requester_id)
             if share and share.isActive:
                 role_str = share.role.value if hasattr(share.role, 'value') else str(share.role)
                 logger.info(f"Access granted via share: {target_user_id} shared with {requester_id} (role: {role_str})")
                 return True
+            # Also try with normalized target (for direct user shares)
+            if normalized_target != target_user_id:
+                share = await sharing_repo.get_share_for_profile(normalized_target, requester_id)
+                if share and share.isActive:
+                    role_str = share.role.value if hasattr(share.role, 'value') else str(share.role)
+                    logger.info(f"Access granted via share: {normalized_target} shared with {requester_id} (role: {role_str})")
+                    return True
         except Exception as e:
             logger.warning(f"Error checking share access: {e}")
 
@@ -202,6 +246,9 @@ async def predict_glucose(
         logger.error(f"Error validating user access: {e}")
         raise HTTPException(status_code=500, detail="Error validating access")
 
+    # Normalize profile ID to data user ID
+    data_user_id = get_data_user_id(user_id)
+
     # Get recent glucose history
     glucose_history = None
     treatments = None
@@ -216,14 +263,14 @@ async def predict_glucose(
             start_time = end_time - timedelta(minutes=request.history_minutes)
 
             glucose_readings = await glucose_repo.get_history(
-                user_id=user_id,
+                user_id=data_user_id,
                 start_time=start_time,
                 end_time=end_time
             )
             glucose_history = [r.model_dump() for r in glucose_readings]
 
             treatment_records = await treatment_repo.get_by_user(
-                user_id=user_id,
+                user_id=data_user_id,
                 start_time=start_time,
                 end_time=end_time
             )
@@ -336,13 +383,16 @@ async def get_current_prediction(
         logger.error(f"Error validating user access: {e}")
         raise HTTPException(status_code=500, detail="Error validating access")
 
+    # Normalize profile ID to data user ID
+    data_user_id = get_data_user_id(user_id)
+
     try:
         glucose_repo = GlucoseRepository()
         treatment_repo = TreatmentRepository()
         iob_cob_service = IOBCOBService()
 
         # Get latest reading
-        current = await glucose_repo.get_current(user_id)
+        current = await glucose_repo.get_current(data_user_id)
         if not current:
             raise HTTPException(status_code=404, detail="No current glucose reading")
 
@@ -351,14 +401,14 @@ async def get_current_prediction(
         start_time = end_time - timedelta(minutes=120)
 
         glucose_readings = await glucose_repo.get_history(
-            user_id=user_id,
+            user_id=data_user_id,
             start_time=start_time,
             end_time=end_time
         )
         glucose_history = [r.model_dump() for r in glucose_readings]
 
         treatments = await treatment_repo.get_by_user(
-            user_id=user_id,
+            user_id=data_user_id,
             start_time=start_time,
             end_time=end_time
         )
@@ -442,6 +492,9 @@ async def calculate_dose(
         logger.error(f"Error validating user access: {e}")
         raise HTTPException(status_code=500, detail="Error validating access")
 
+    # Normalize profile ID to data user ID
+    data_user_id = get_data_user_id(user_id)
+
     try:
         treatment_repo = TreatmentRepository()
         iob_cob_service = IOBCOBService()
@@ -451,7 +504,7 @@ async def calculate_dose(
         start_time = end_time - timedelta(minutes=180)
 
         treatments = await treatment_repo.get_by_user(
-            user_id=user_id,
+            user_id=data_user_id,
             start_time=start_time,
             end_time=end_time
         )
@@ -567,6 +620,9 @@ async def get_isf(
         logger.error(f"Error validating user access: {e}")
         raise HTTPException(status_code=500, detail="Error validating access")
 
+    # Normalize profile ID to data user ID
+    data_user_id = get_data_user_id(user_id)
+
     try:
         treatment_repo = TreatmentRepository()
         iob_cob_service = IOBCOBService()
@@ -576,7 +632,7 @@ async def get_isf(
         start_time = end_time - timedelta(minutes=180)
 
         treatments = await treatment_repo.get_by_user(
-            user_id=user_id,
+            user_id=data_user_id,
             start_time=start_time,
             end_time=end_time
         )
@@ -649,13 +705,16 @@ async def get_dual_predictions(
         logger.error(f"Error validating user access: {e}")
         raise HTTPException(status_code=500, detail="Error validating access")
 
+    # Normalize profile ID to data user ID
+    data_user_id = get_data_user_id(user_id)
+
     try:
         glucose_repo = GlucoseRepository()
         treatment_repo = TreatmentRepository()
         iob_cob_service = IOBCOBService()
 
         # Get latest reading
-        current = await glucose_repo.get_current(user_id)
+        current = await glucose_repo.get_current(data_user_id)
         if not current:
             raise HTTPException(status_code=404, detail="No current glucose reading")
 
@@ -664,7 +723,7 @@ async def get_dual_predictions(
         start_time = end_time - timedelta(minutes=180)
 
         treatments = await treatment_repo.get_by_user(
-            user_id=user_id,
+            user_id=data_user_id,
             start_time=start_time,
             end_time=end_time
         )
@@ -676,7 +735,7 @@ async def get_dual_predictions(
 
         # Calculate current BG trend from recent readings
         glucose_readings = await glucose_repo.get_history(
-            user_id=user_id,
+            user_id=data_user_id,
             start_time=end_time - timedelta(minutes=30),
             end_time=end_time
         )
