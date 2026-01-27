@@ -236,6 +236,38 @@ async def health_check():
     return {"status": "healthy", "version": settings.app_version}
 
 
+@app.get("/email-test")
+async def email_test(to: str = "jadericdawson@gmail.com"):
+    """Test email service configuration and send test email."""
+    from services.email_service import get_email_service
+
+    email_service = get_email_service()
+
+    result = {
+        "configured": email_service.is_configured,
+        "connection_string_set": bool(settings.azure_communication_connection_string),
+        "sender_address": settings.email_sender_address,
+        "client_initialized": email_service.client is not None,
+        "test_email_sent": False,
+        "error": None
+    }
+
+    if email_service.is_configured:
+        try:
+            success = await email_service.send_email(
+                to_email=to,
+                subject="T1D-AI Email Test",
+                html_content="<h1>✅ Email Service Works!</h1><p>Your T1D-AI email configuration is working correctly.</p>",
+                plain_text="Email Service Works! Your T1D-AI email configuration is working correctly."
+            )
+            result["test_email_sent"] = success
+        except Exception as e:
+            result["error"] = str(e)
+            logger.error(f"Email test failed: {e}")
+
+    return result
+
+
 @app.get("/ready")
 async def readiness_check():
     """Readiness check - verifies all dependencies are available."""
