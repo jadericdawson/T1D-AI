@@ -25,6 +25,11 @@ glucose_repo = GlucoseRepository()
 treatment_repo = TreatmentRepository()
 
 
+def get_data_user_id(profile_id: str) -> str:
+    """Get the userId for database queries. Profile IDs are used AS-IS."""
+    return profile_id
+
+
 class ConnectGlurooRequest(BaseModel):
     """Request to connect Gluroo account."""
     url: str
@@ -72,7 +77,7 @@ async def connect_gluroo(
 
     Saves encrypted credentials and performs initial data sync.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         # Test connection first
         service = GlurooService(request.url, request.apiSecret)
@@ -123,7 +128,7 @@ async def disconnect_gluroo(current_user: User = Depends(get_current_user)):
 
     Removes stored credentials but does not delete synced data.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         deleted = await datasource_repo.delete(user_id, "gluroo")
         if not deleted:
@@ -151,7 +156,7 @@ async def sync_gluroo(
     Performs incremental sync by default (since last sync).
     Use full_sync=true to fetch all available data.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         # Get stored credentials
         datasource = await datasource_repo.get(user_id, "gluroo")
@@ -290,7 +295,7 @@ async def get_gluroo_status(current_user: User = Depends(get_current_user)):
     """
     Get Gluroo connection status.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         datasource = await datasource_repo.get(user_id, "gluroo")
 
