@@ -219,25 +219,15 @@ async def get_current_glucose(
         dexcom_svc = get_dexcom_service()
 
         if dexcom_svc:
-            # Check if user has CGM data (dexcom OR gluroo source)
-            # Dexcom is PRIMARY source, Gluroo is backup
+            # Always try Dexcom first (PRIMARY source) - it's shared for all users
+            # We'll check if the data matches this user's CGM pattern later
             try:
-                recent_dexcom = await glucose_repo.get_recent_by_source(data_user_id, "dexcom", hours=48)
-                recent_gluroo = await glucose_repo.get_recent_by_source(data_user_id, "gluroo", hours=48)
-                user_has_cgm = len(recent_dexcom) > 0 or len(recent_gluroo) > 0
-
-                if user_has_cgm:
-                    try:
-                        dexcom_reading = await dexcom_svc.get_latest_reading_async()
-                        if dexcom_reading:
-                            latest = dexcom_to_glucose_reading(dexcom_reading, data_user_id)
-                            logger.info(f"Got fresh reading from Dexcom (PRIMARY): {latest.value} mg/dL")
-                    except Exception as e:
-                        logger.warning(f"Dexcom fetch failed, will use Gluroo backup: {e}")
-                else:
-                    logger.debug(f"User {user_id} has no CGM data, skipping Dexcom fetch")
+                dexcom_reading = await dexcom_svc.get_latest_reading_async()
+                if dexcom_reading:
+                    latest = dexcom_to_glucose_reading(dexcom_reading, data_user_id)
+                    logger.info(f"Got fresh reading from Dexcom (PRIMARY): {latest.value} mg/dL")
             except Exception as e:
-                logger.warning(f"Error checking CGM status for user: {e}")
+                logger.warning(f"Dexcom fetch failed, will use Gluroo backup: {e}")
 
         # Fall back to Gluroo/database if Dexcom unavailable or stale
         gluroo_latest = await glucose_repo.get_latest(data_user_id)
