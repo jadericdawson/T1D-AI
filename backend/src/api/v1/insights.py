@@ -27,19 +27,6 @@ treatment_repo = TreatmentRepository()
 insight_repo = InsightRepository()
 
 
-def get_data_user_id(profile_id: str) -> str:
-    """
-    Get the userId to use for database queries.
-
-    For 'self' profiles, the profile ID is 'profile_{user_id}' but data
-    is stored with just the user_id.
-    For managed profiles (children), profile_id IS the data user_id.
-    """
-    if profile_id.startswith("profile_"):
-        return profile_id[8:]  # Strip "profile_" prefix (8 chars)
-    return profile_id
-
-
 # Response Models
 class InsightResponse(BaseModel):
     """AI insight response."""
@@ -126,7 +113,7 @@ async def get_insights(
     - warning: Alerts about concerning trends
     - achievement: Positive feedback
     """
-    user_id = get_data_user_id(current_user.id)
+    user_id = current_user.id
     try:
         insights = await insight_repo.get_by_user(
             user_id=user_id,
@@ -173,7 +160,7 @@ async def get_patterns(
     - Nocturnal hypoglycemia
     - Glucose variability
     """
-    user_id = get_data_user_id(current_user.id)
+    user_id = current_user.id
     try:
         result = await insight_service.detect_patterns(user_id, days)
         return result
@@ -197,7 +184,7 @@ async def get_meal_impact(
     - Problematic meal types
     - Personalized recommendations
     """
-    user_id = get_data_user_id(current_user.id)
+    user_id = current_user.id
     try:
         result = await insight_service.analyze_meal_impact(user_id, days)
 
@@ -231,7 +218,7 @@ async def get_anomalies(
     - Compression lows
     - Unusual patterns
     """
-    user_id = get_data_user_id(current_user.id)
+    user_id = current_user.id
     try:
         anomalies = await insight_service.detect_anomalies(user_id, hours)
 
@@ -269,7 +256,7 @@ async def generate_insights(
     Uses GPT-4.1 to analyze glucose patterns and provide personalized recommendations.
     Insights are cached for 1 hour.
     """
-    user_id = get_data_user_id(current_user.id)
+    user_id = current_user.id
     try:
         result = await insight_service.generate_insights(user_id, force)
         return GenerateInsightsResponse(**result)
@@ -291,7 +278,7 @@ async def get_weekly_summary(
     - Week-over-week comparison
     - AI-generated summary and recommendations
     """
-    user_id = get_data_user_id(current_user.id)
+    user_id = current_user.id
     try:
         result = await insight_service.get_weekly_summary(user_id)
 
@@ -314,7 +301,7 @@ async def cleanup_expired_insights(
     """
     Clean up expired insights for a user.
     """
-    user_id = get_data_user_id(current_user.id)
+    user_id = current_user.id
     try:
         deleted_count = await insight_repo.delete_expired(user_id)
         return {
@@ -380,7 +367,7 @@ async def get_realtime_insight(
 
     Returns immediate, actionable advice that accounts for personalized metabolic state.
     """
-    user_id = get_data_user_id(current_user.id)
+    user_id = current_user.id
     try:
         # Fetch learned parameters if not provided in request
         # This ensures AI gets ACTUAL learned values, not defaults
@@ -509,7 +496,7 @@ async def chat_with_ai(
     The AI uses current diabetes state (BG, IOB, COB, ISF, etc.)
     to provide specific, calculated answers with LEARNED metabolic parameters.
     """
-    user_id = get_data_user_id(current_user.id)
+    user_id = current_user.id
     try:
         # Fetch learned parameters if not provided in request
         isf = request.isf
