@@ -314,3 +314,70 @@ async def delete_user(
     except Exception as e:
         logger.error(f"Error deleting user: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete user")
+
+
+@router.post("/resend-verification")
+async def resend_verification_email(
+    email: str = Query(..., description="Email address to resend verification to"),
+    copy_to: Optional[str] = Query(None, description="Optional email to send a copy to"),
+    admin_user: User = Depends(require_admin)
+):
+    """
+    Resend verification email to a user (admin only).
+    Optionally send a copy to another email for testing.
+    """
+    try:
+        from services.email_service import get_email_service
+
+        # Find the user
+        user = await user_repo.get_by_email(email)
+        if not user:
+            raise HTTPException(status_code=404, detail=f"User {email} not found")
+
+        # Get or generate verification token
+        if not user.emailVerificationToken:
+            import secrets
+            from datetime import datetime, timedelta
+            user.emailVerificationToken = secrets.token_urlsafe(32)
+            user.emailVerificationExpires = datetime.utcnow() + timedelta(hours=24)
+            await user_repo.update(user.id, {
+                "emailVerificationToken": user.emailVerificationToken,
+                "emailVerificationExpires": user.emailVerificationExpires.isoformat()
+            })
+
+        email_service = get_email_service()
+
+        # Send to original user
+        try:
+            await email_service.send_verification_email(
+                to_email=user.email,
+                display_name=user.displayName or user.email.split('@')[0],
+                verification_token=user.emailVerificationToken
+            )
+            logger.info(f"Admin {admin_user.email} resent verification to {user.email}")
+        except Exception as e:
+            logger.error(f"Failed to send to {user.email}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+
+        # Send copy if requested
+        if copy_to:
+            try:
+                await email_service.send_verification_email(
+                    to_email=copy_to,
+                    display_name=f"{user.displayName or user.email.split('@')[0]} (Copy)",
+                    verification_token=user.emailVerificationToken
+                )
+                logger.info(f"Sent copy to {copy_to}")
+            except Exception as e:
+                logger.warning(f"Failed to send copy to {copy_to}: {e}")
+
+        return {
+            "message": f"Verification email sent to {user.email}" + (f" and {copy_to}" if copy_to else ""),
+            "token": user.emailVerificationToken[:20] + "..."
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error resending verification: {e}")
+        raise HTTPException(status_code=500, detail="Failed to resend verification email")
