@@ -24,7 +24,14 @@ router = APIRouter()
 
 
 def get_data_user_id(profile_id: str) -> str:
-    """Get the userId for database queries. Profile IDs are used AS-IS."""
+    """
+    Strip profile_ prefix for data access.
+    
+    Data is stored under base user ID without prefix.
+    Profile IDs like 'profile_05bf...' map to data under '05bf...'
+    """
+    if profile_id.startswith("profile_"):
+        return profile_id[8:]  # Strip "profile_" prefix
     return profile_id
 
 
