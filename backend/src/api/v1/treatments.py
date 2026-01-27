@@ -25,14 +25,7 @@ router = APIRouter()
 
 
 def get_data_user_id(profile_id: str) -> str:
-    """
-    Convert a profile ID to the actual data user ID.
-
-    For 'self' profiles, the profile ID is 'profile_{user_id}' but data
-    is stored with just the raw user_id. This function strips the prefix.
-    """
-    if profile_id.startswith("profile_"):
-        return profile_id[8:]  # Strip "profile_" prefix (8 chars)
+    """Get the userId for database queries. Profile IDs are used AS-IS."""
     return profile_id
 
 
