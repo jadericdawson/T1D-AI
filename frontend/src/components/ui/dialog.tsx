@@ -39,14 +39,16 @@ const DialogContent = React.forwardRef<
       className={cn(
         // Base: centered horizontally and vertically with fixed positioning
         'fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg gap-4 border bg-background p-6 shadow-lg',
-        // Use !important to prevent position shifts
-        '!translate-x-[-50%] !translate-y-[-50%]',
+        // Lock transform - prevent any animation/transition on position
+        'translate-x-[-50%] translate-y-[-50%]',
+        // NO transition/duration on the modal itself (prevents position animation)
         // Max height and scroll
         'max-h-[90vh] overflow-y-auto',
-        // Disable animations that might cause position shifts
+        // Rounded corners
         'sm:rounded-lg',
         className
       )}
+      style={{ transform: 'translate(-50%, -50%)' }}
       {...props}
     >
       {children}
