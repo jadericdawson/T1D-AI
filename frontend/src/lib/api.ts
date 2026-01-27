@@ -219,6 +219,9 @@ api.interceptors.response.use(
       // Refresh failed - clear auth and logout
       console.warn('[API] 401 Unauthorized - token refresh failed, logging out')
       clearAuthAndLogout()
+
+      // Return a rejected promise with a clear message for the UI
+      return Promise.reject(new Error('Session expired - redirecting to login'))
     }
 
     return Promise.reject(error)

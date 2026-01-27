@@ -45,6 +45,14 @@ export function useCurrentGlucose(userId: string) {
     enabled: !!userId, // Only fetch when userId is available
     refetchInterval: 60000, // Refetch every minute
     staleTime: 30000, // Consider stale after 30 seconds
+    retry: (failureCount, error: any) => {
+      // Don't retry on auth errors - let the event listener handle redirect
+      if (error?.message?.includes('Session expired') || error?.response?.status === 401) {
+        console.log('[useCurrentGlucose] Auth error detected, not retrying')
+        return false
+      }
+      return failureCount < 3
+    },
   })
 }
 
@@ -58,6 +66,14 @@ export function useGlucoseHistory(
     enabled: !!userId, // Only fetch when userId is available
     staleTime: 60000,
     refetchInterval: 60000, // Auto-refresh every minute for real-time updates
+    retry: (failureCount, error: any) => {
+      // Don't retry on auth errors - let the event listener handle redirect
+      if (error?.message?.includes('Session expired') || error?.response?.status === 401) {
+        console.log('[useGlucoseHistory] Auth error detected, not retrying')
+        return false
+      }
+      return failureCount < 3
+    },
   })
 }
 
@@ -105,6 +121,14 @@ export function useRecentTreatments(hours: number = 24, userId?: string) {
     queryFn: () => treatmentsApi.getRecent(hours, userId),
     staleTime: 60000,
     refetchInterval: 60000, // Auto-refresh every minute
+    retry: (failureCount, error: any) => {
+      // Don't retry on auth errors - let the event listener handle redirect
+      if (error?.message?.includes('Session expired') || error?.response?.status === 401) {
+        console.log('[useRecentTreatments] Auth error detected, not retrying')
+        return false
+      }
+      return failureCount < 3
+    },
   })
 }
 

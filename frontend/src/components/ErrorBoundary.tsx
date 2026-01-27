@@ -40,6 +40,34 @@ export class ErrorBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
+      // Check if it's an auth error
+      const isAuthError = this.state.error?.message?.includes('Session expired') ||
+        this.state.error?.message?.includes('token') ||
+        this.state.error?.message?.includes('401') ||
+        this.state.error?.message?.includes('Unauthorized')
+
+      // For auth errors, show a simpler message and auto-redirect
+      if (isAuthError) {
+        return (
+          <div className="min-h-screen flex items-center justify-center p-6 bg-slate-950">
+            <div className="max-w-md w-full bg-slate-900 border border-amber-500/30 rounded-lg p-6 text-center">
+              <AlertCircle className="w-12 h-12 text-amber-500 mx-auto mb-4" />
+              <h1 className="text-xl font-bold text-white mb-2">Session Expired</h1>
+              <p className="text-gray-300 mb-4">
+                Your session has expired. Please log in again to continue.
+              </p>
+              <button
+                onClick={this.handleClearAndReload}
+                className="w-full px-4 py-2 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg transition"
+              >
+                Go to Login
+              </button>
+            </div>
+          </div>
+        )
+      }
+
+      // For other errors, show detailed error info
       return (
         <div className="min-h-screen flex items-center justify-center p-6 bg-slate-950">
           <div className="max-w-lg w-full bg-slate-900 border border-red-500/30 rounded-lg p-6">

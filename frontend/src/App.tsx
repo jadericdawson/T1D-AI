@@ -13,6 +13,7 @@ import VerifyEmail from './pages/VerifyEmail'
 import AcceptInvite from './pages/AcceptInvite'
 import { useAuthStore } from './stores/authStore'
 import { Toaster } from './components/ui/toaster'
+import { ErrorBoundary } from './components/ErrorBoundary'
 
 // Protected route component with onboarding guard
 function ProtectedRoute({ children, requireOnboarding = true }: { children: React.ReactNode; requireOnboarding?: boolean }) {
@@ -35,7 +36,11 @@ function ProtectedRoute({ children, requireOnboarding = true }: { children: Reac
     return <Navigate to="/onboarding" replace />
   }
 
-  return <>{children}</>
+  return (
+    <ErrorBoundary>
+      {children}
+    </ErrorBoundary>
+  )
 }
 
 // Auth event listener hook
