@@ -215,7 +215,6 @@ export function TreatmentModal({
                       max={cfg.max}
                       step={cfg.step}
                       className="text-2xl font-orbitron h-14 pr-12 bg-slate-800 border-gray-700 text-white"
-                      autoFocus
                     />
                     <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 text-lg">
                       {cfg.unit}
