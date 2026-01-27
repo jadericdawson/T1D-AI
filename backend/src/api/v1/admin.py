@@ -3,6 +3,7 @@ Admin API Routes.
 Provides admin-only endpoints for user management, analytics, and platform monitoring.
 """
 import logging
+import secrets
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -336,8 +337,6 @@ async def resend_verification_email(
 
         # Get or generate verification token
         if not user.emailVerificationToken:
-            import secrets
-            from datetime import datetime, timedelta
             user.emailVerificationToken = secrets.token_urlsafe(32)
             user.emailVerificationExpires = datetime.utcnow() + timedelta(hours=24)
             await user_repo.update(user.id, {
