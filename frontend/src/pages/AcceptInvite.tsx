@@ -12,7 +12,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useAuthStore } from '@/stores/authStore'
-import { sharingApi, ShareInvitation, AcceptInviteResponse } from '@/lib/api'
+import { sharingApi, ShareInvitation } from '@/lib/api'
 
 const ROLE_CONFIG: Record<string, { icon: typeof Eye; color: string; bgColor: string; label: string; description: string }> = {
   viewer: {
@@ -43,7 +43,7 @@ export default function AcceptInvite() {
   const [searchParams] = useSearchParams()
   const token = searchParams.get('token')
 
-  const { isAuthenticated, user, loadProfiles, switchToUser } = useAuthStore()
+  const { isAuthenticated, user, loadProfiles } = useAuthStore()
 
   const [status, setStatus] = useState<'loading' | 'ready' | 'accepting' | 'success' | 'error'>('loading')
   const [invitation, setInvitation] = useState<ShareInvitation | null>(null)
@@ -83,22 +83,14 @@ export default function AcceptInvite() {
 
     setStatus('accepting')
     try {
-      const result: AcceptInviteResponse = await sharingApi.acceptInvitation(token)
+      await sharingApi.acceptInvitation(token)
       setStatus('success')
 
       // Reload profiles to include the new share
       await loadProfiles()
 
-      // Switch to viewing the shared user's data immediately
-      switchToUser(result.ownerId, {
-        id: result.ownerId,
-        email: result.ownerEmail,
-        displayName: invitation.profileName || invitation.ownerName || invitation.ownerEmail,
-        role: invitation.role,
-        permissions: [], // Will be populated from the share
-      })
-
-      // Redirect to dashboard after short delay
+      // Redirect to dashboard - the shared profile will now be in the dropdown
+      // Don't auto-switch - let user select from profile dropdown
       setTimeout(() => {
         navigate('/dashboard')
       }, 1500)
