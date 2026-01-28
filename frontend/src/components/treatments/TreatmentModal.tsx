@@ -83,9 +83,15 @@ const quickTimeOffsets = [
 ]
 
 // Format date for datetime-local input (YYYY-MM-DDTHH:mm)
+// Must use local time methods (not UTC) to match datetime-local input behavior
 const formatDateTimeLocal = (date: Date): string => {
   const pad = (n: number) => n.toString().padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  const year = date.getFullYear()
+  const month = pad(date.getMonth() + 1)
+  const day = pad(date.getDate())
+  const hours = pad(date.getHours())
+  const minutes = pad(date.getMinutes())
+  return `${year}-${month}-${day}T${hours}:${minutes}`
 }
 
 // Format time for display
@@ -149,7 +155,13 @@ export function TreatmentModal({
   }
 
   const handleDateTimeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newDate = new Date(e.target.value)
+    // datetime-local input value is in format: "2026-01-27T15:30"
+    // We need to parse it as local time, not UTC
+    const inputValue = e.target.value
+    if (!inputValue) return
+
+    // Parse as local time by appending current timezone offset
+    const newDate = new Date(inputValue)
     if (!isNaN(newDate.getTime())) {
       setTimestamp(newDate)
     }
@@ -272,6 +284,7 @@ export function TreatmentModal({
                     value={dateTimeLocalValue}
                     onChange={handleDateTimeChange}
                     className="bg-slate-800 border-gray-700 text-white"
+                    step="60"
                   />
                 </div>
 
