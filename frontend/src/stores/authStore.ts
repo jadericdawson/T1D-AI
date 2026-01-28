@@ -417,7 +417,7 @@ export const useAuthStore = create<AuthState>()(
               role: string
               permissions: string[]
             }) => ({
-              id: share.ownerId,
+              id: share.profileId || share.ownerId,  // Use profileId for viewing specific profile
               email: share.ownerEmail,
               displayName: share.profileName || share.ownerName || share.ownerEmail,
               role: share.role,
