@@ -1448,12 +1448,26 @@ export default function Dashboard() {
               </label>
               <Input
                 type="datetime-local"
-                value={editingTreatment?.timestamp ? new Date(editingTreatment.timestamp).toISOString().slice(0, 16) : ''}
-                onChange={(e) => setEditingTreatment(prev => prev ? {
-                  ...prev,
-                  timestamp: new Date(e.target.value).toISOString()
-                } : null)}
+                value={editingTreatment?.timestamp ? (() => {
+                  // Convert UTC timestamp to LOCAL time for datetime-local input
+                  const date = new Date(editingTreatment.timestamp)
+                  const pad = (n: number) => n.toString().padStart(2, '0')
+                  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+                })() : ''}
+                onChange={(e) => {
+                  // Parse datetime-local as LOCAL time, then convert to ISO UTC
+                  const [datePart, timePart] = e.target.value.split('T')
+                  const [year, month, day] = datePart.split('-').map(Number)
+                  const [hours, minutes] = timePart.split(':').map(Number)
+                  const localDate = new Date(year, month - 1, day, hours, minutes, 0, 0)
+
+                  setEditingTreatment(prev => prev ? {
+                    ...prev,
+                    timestamp: localDate.toISOString()
+                  } : null)
+                }}
                 className="bg-slate-800 border-gray-700 text-white"
+                step="60"
               />
             </div>
           </div>
