@@ -1155,6 +1155,36 @@ class InvitationRepository(BaseRepository):
         except exceptions.CosmosResourceNotFoundError:
             return False
 
+    async def get_by_owner_and_email(self, owner_id: str, invitee_email: str) -> List[ShareInvitation]:
+        """Get pending invitations from owner to specific email."""
+        query = """
+            SELECT *
+            FROM c
+            WHERE c.ownerId = @ownerId
+                AND c.inviteeEmail = @email
+                AND c.isUsed = false
+            ORDER BY c.createdAt DESC
+        """
+        items = list(self.container.query_items(
+            query=query,
+            parameters=[
+                {"name": "@ownerId", "value": owner_id},
+                {"name": "@email", "value": invitee_email.lower()}
+            ],
+            partition_key=owner_id
+        ))
+        return [ShareInvitation(**item) for item in items]
+
+    async def delete(self, invitation_id: str, owner_id: str) -> bool:
+        """Delete an invitation."""
+        try:
+            self.container.delete_item(item=invitation_id, partition_key=owner_id)
+            logger.info(f"Deleted invitation: {invitation_id}")
+            return True
+        except exceptions.CosmosResourceNotFoundError:
+            logger.warning(f"Invitation {invitation_id} not found for deletion")
+            return False
+
 
 class UserModelRepository(BaseRepository):
     """Repository for user-specific ML models."""

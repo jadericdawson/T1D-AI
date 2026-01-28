@@ -89,14 +89,14 @@ async def invite_user(request: InviteRequest, current_user=Depends(get_current_u
     if request.email.lower() == current_user.email.lower():
         raise HTTPException(status_code=400, detail="Cannot invite yourself")
 
-    # Check if share already exists
+    # Check if share already exists (active share - not just invitation)
     invitee = await user_repo.get_by_email(request.email)
     if invitee:
         existing_share = await sharing_repo.get_share(current_user.id, invitee.id)
         if existing_share:
             raise HTTPException(
                 status_code=409,
-                detail="You are already sharing with this user"
+                detail=f"Already sharing with {request.email}. They can view your data from their profile selector."
             )
 
     # Validate role
@@ -128,7 +128,24 @@ async def invite_user(request: InviteRequest, current_user=Depends(get_current_u
     else:
         permissions = request.permissions
 
-    # Create invitation
+    # Check for existing pending invitation - allow resend with new token
+    existing_invitations = await invitation_repo.get_by_owner_and_email(
+        current_user.id,
+        request.email.lower()
+    )
+
+    is_resend = False
+    if existing_invitations:
+        # Delete old invitation(s) - latest send takes priority
+        for old_inv in existing_invitations:
+            try:
+                await invitation_repo.delete(old_inv.id, current_user.id)
+                logger.info(f"Deleted old invitation {old_inv.id} to resend fresh one")
+                is_resend = True
+            except Exception as e:
+                logger.warning(f"Could not delete old invitation: {e}")
+
+    # Create new invitation with fresh token and expiration
     invitation = ShareInvitation(
         id=str(uuid.uuid4()),
         ownerId=current_user.id,
@@ -166,7 +183,7 @@ async def invite_user(request: InviteRequest, current_user=Depends(get_current_u
         invitationId=created.id,
         inviteeEmail=created.inviteeEmail,
         expiresAt=created.expiresAt,
-        message=f"Invitation sent to {created.inviteeEmail}. They can accept it from their Settings page."
+        message=f"Invitation {'resent' if is_resend else 'sent'} to {created.inviteeEmail}. They can accept it from their Settings page or the email link."
     )
 
 
