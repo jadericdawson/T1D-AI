@@ -50,6 +50,22 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { cn, formatTime } from '@/lib/utils'
 
+// Helper: Convert UTC ISO timestamp to datetime-local format (local time)
+const formatDateTimeLocal = (isoTimestamp: string): string => {
+  const date = new Date(isoTimestamp)
+  const pad = (n: number) => n.toString().padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+// Helper: Parse datetime-local (local time) to UTC ISO string
+const parseDateTimeLocalToISO = (localDateTimeString: string): string => {
+  const [datePart, timePart] = localDateTimeString.split('T')
+  const [year, month, day] = datePart.split('-').map(Number)
+  const [hours, minutes] = timePart.split(':').map(Number)
+  const localDate = new Date(year, month - 1, day, hours, minutes, 0, 0)
+  return localDate.toISOString()
+}
+
 // Components
 import { CurrentGlucose } from '@/components/glucose/CurrentGlucose'
 // Lazy load Plotly chart to prevent bundle crashes from Node.js dependencies
@@ -1448,24 +1464,11 @@ export default function Dashboard() {
               </label>
               <Input
                 type="datetime-local"
-                value={editingTreatment?.timestamp ? (() => {
-                  // Convert UTC timestamp to LOCAL time for datetime-local input
-                  const date = new Date(editingTreatment.timestamp)
-                  const pad = (n: number) => n.toString().padStart(2, '0')
-                  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
-                })() : ''}
-                onChange={(e) => {
-                  // Parse datetime-local as LOCAL time, then convert to ISO UTC
-                  const [datePart, timePart] = e.target.value.split('T')
-                  const [year, month, day] = datePart.split('-').map(Number)
-                  const [hours, minutes] = timePart.split(':').map(Number)
-                  const localDate = new Date(year, month - 1, day, hours, minutes, 0, 0)
-
-                  setEditingTreatment(prev => prev ? {
-                    ...prev,
-                    timestamp: localDate.toISOString()
-                  } : null)
-                }}
+                value={editingTreatment?.timestamp ? formatDateTimeLocal(editingTreatment.timestamp) : ''}
+                onChange={(e) => setEditingTreatment(prev => prev ? {
+                  ...prev,
+                  timestamp: parseDateTimeLocalToISO(e.target.value)
+                } : null)}
                 className="bg-slate-800 border-gray-700 text-white"
                 step="60"
               />
