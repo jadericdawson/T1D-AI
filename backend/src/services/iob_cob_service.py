@@ -1155,9 +1155,10 @@ class IOBCOBService:
             # Calculate how well this food matches target
             carb_diff = abs(avg_carbs - target_carbs)
 
-            # Score: prefer foods eaten frequently and close to target carbs
-            # Allow foods within 2x of target (can eat half or double portion)
-            if avg_carbs > 0 and (avg_carbs <= target_carbs * 2.5 or carb_diff <= tolerance_grams * 2):
+            # Score: prefer foods eaten frequently and CLOSE to target carbs
+            # Only include foods within ±50% of target (e.g., for 10g target: 5-15g range)
+            # This ensures recommendations match the calculated deficit
+            if avg_carbs > 0 and carb_diff <= max(tolerance_grams, target_carbs * 0.5):
                 # Calculate portion to match target
                 portion_multiplier = target_carbs / avg_carbs if avg_carbs > 0 else 1
 
@@ -1181,8 +1182,8 @@ class IOBCOBService:
         # Sort by closest to target carbs, then by frequency
         suggestions.sort(key=lambda x: (x[0], x[1]))
 
-        # Return top 5 suggestions
-        return [s[2] for s in suggestions[:5]]
+        # Return top 3 suggestions (not 5) - keep it focused
+        return [s[2] for s in suggestions[:3]]
 
     def calculate_full_recommendation(
         self,
