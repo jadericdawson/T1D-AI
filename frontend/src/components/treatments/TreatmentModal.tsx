@@ -112,9 +112,16 @@ export function TreatmentModal({
   currentBg,
   recommendedDose,
 }: TreatmentModalProps) {
+  // Initialize timestamp without seconds/milliseconds for cleaner display
+  const getCleanNow = () => {
+    const now = new Date()
+    now.setSeconds(0, 0)
+    return now
+  }
+
   const [value, setValue] = useState('')
   const [notes, setNotes] = useState('')
-  const [timestamp, setTimestamp] = useState<Date>(new Date())
+  const [timestamp, setTimestamp] = useState<Date>(getCleanNow())
   const [showSuccess, setShowSuccess] = useState(false)
 
   const { mutate: logTreatment, isPending, isError } = useLogTreatment()
@@ -142,7 +149,7 @@ export function TreatmentModal({
           onOpenChange(false)
           setValue('')
           setNotes('')
-          setTimestamp(new Date())
+          setTimestamp(getCleanNow())
         }, 1500)
       },
     })
@@ -151,17 +158,26 @@ export function TreatmentModal({
   const handleTimeOffset = (offsetMinutes: number) => {
     const newDate = new Date()
     newDate.setMinutes(newDate.getMinutes() + offsetMinutes)
+    // Round to nearest minute to avoid seconds mismatch
+    newDate.setSeconds(0, 0)
     setTimestamp(newDate)
   }
 
   const handleDateTimeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    // datetime-local input value is in format: "2026-01-27T15:30"
-    // We need to parse it as local time, not UTC
+    // datetime-local input value is in format: "2026-01-27T15:30" (local time, no timezone)
     const inputValue = e.target.value
     if (!inputValue) return
 
-    // Parse as local time by appending current timezone offset
-    const newDate = new Date(inputValue)
+    // CRITICAL: Parse as LOCAL time, not UTC
+    // Using Date constructor directly can parse as UTC in some browsers (causing 7pm → 12am bug)
+    // Instead, parse the string and construct Date with local time components
+    const [datePart, timePart] = inputValue.split('T')
+    const [year, month, day] = datePart.split('-').map(Number)
+    const [hours, minutes] = timePart.split(':').map(Number)
+
+    // Date constructor with Y,M,D,H,M creates a date in LOCAL timezone
+    const newDate = new Date(year, month - 1, day, hours, minutes, 0, 0)
+
     if (!isNaN(newDate.getTime())) {
       setTimestamp(newDate)
     }
