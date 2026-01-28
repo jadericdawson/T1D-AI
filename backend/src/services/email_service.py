@@ -111,11 +111,11 @@ class EmailService:
         """
         verification_url = f"{self.settings.frontend_url}/verify-email?token={verification_token}"
 
-        subject = "Verify your T1D-AI account"
+        subject = "Verify Your T1D-AI Account - Action Required"
 
         html_content = f"""
         <!DOCTYPE html>
-        <html>
+        <html lang="en">
         <head>
             <style>
                 body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }}
@@ -372,7 +372,7 @@ If you didn't request a password reset, you can safely ignore this email. Your p
         }
         role_description = role_descriptions.get(role.lower(), "view their data")
 
-        subject = f"{owner_name or owner_email} wants to share their T1D-AI data with you"
+        subject = f"T1D-AI: {owner_name or owner_email} Shared Glucose Data With You"
 
         html_content = f"""
         <!DOCTYPE html>
