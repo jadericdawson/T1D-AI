@@ -1,12 +1,12 @@
 """
-Tandem Sync Service - Fetches pump data from Tandem and pushes to Gluroo + CosmosDB.
+Tandem Sync Service - Fetches pump data from Tandem, writes to CosmosDB and Gluroo.
 
 Data flow:
-  Basal:            Tandem API -> CosmosDB (direct, Gluroo doesn't track basal)
-  Bolus + Carbs:    Tandem API -> Gluroo (Nightscout API) -> CosmosDB (via Gluroo sync)
+  All treatments:   Tandem API -> CosmosDB (direct write)
+  Bolus + Carbs:    Tandem API -> Gluroo (Nightscout API) for mobile app visibility
 
-Bolus/carb data is pushed to Gluroo so it appears in the Gluroo mobile app
-and gets picked up by the normal Gluroo sync into CosmosDB.
+Gluroo sync skips entries with enteredBy='tandem-sync' to avoid duplicates,
+so all Tandem data must be written directly to CosmosDB.
 """
 import hashlib
 import logging
@@ -34,7 +34,7 @@ _EVENT_TYPE_MAP = {
 
 
 class TandemSyncService:
-    """Fetches Tandem pump data. Writes basal to CosmosDB, bolus/carbs to Gluroo."""
+    """Fetches Tandem pump data. Writes all treatments to CosmosDB, pushes bolus/carbs to Gluroo."""
 
     def __init__(self):
         self._treatment_repo = None
@@ -59,8 +59,8 @@ class TandemSyncService:
         """
         Run one sync cycle for a single Tandem data source.
 
-        - Basal treatments -> CosmosDB directly
-        - Bolus/carb treatments -> Gluroo (if credentials provided)
+        - All treatments (basal, bolus, carbs) -> CosmosDB directly
+        - Bolus/carb treatments -> also pushed to Gluroo for mobile app visibility
         """
         until = until or datetime.now(timezone.utc)
         logger.info(f"Tandem sync for {user_id}: {since.isoformat()} to {until.isoformat()}")
@@ -76,7 +76,7 @@ class TandemSyncService:
         bolus_count = sum(1 for t in bolus_treatments if t.type != "carbs")
         carb_count = sum(1 for t in bolus_treatments if t.type == "carbs")
 
-        # Write basal to CosmosDB (Gluroo doesn't track basal)
+        # Write ALL treatments to CosmosDB directly
         basal_count = 0
         for t in basal_treatments:
             try:
@@ -85,7 +85,15 @@ class TandemSyncService:
             except Exception as e:
                 logger.warning(f"Failed to upsert basal treatment {t.id}: {e}")
 
-        # Push bolus/carb treatments to Gluroo so they appear in the mobile app
+        bolus_cosmos_count = 0
+        for t in bolus_treatments:
+            try:
+                await self.treatment_repo.upsert_dict(t.to_cosmos_dict())
+                bolus_cosmos_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to upsert treatment {t.id}: {e}")
+
+        # Also push bolus/carb treatments to Gluroo for mobile app visibility
         gluroo_count = 0
         if gluroo_url and gluroo_api_secret and bolus_treatments:
             gluroo_count = self._push_to_gluroo(
@@ -95,7 +103,7 @@ class TandemSyncService:
         total = basal_count + bolus_count + carb_count
         logger.info(
             f"Tandem sync complete for {user_id}: "
-            f"{basal_count} basal -> CosmosDB, "
+            f"{basal_count} basal + {bolus_cosmos_count} bolus/carbs -> CosmosDB, "
             f"{gluroo_count}/{len(bolus_treatments)} bolus+carbs -> Gluroo"
         )
 
