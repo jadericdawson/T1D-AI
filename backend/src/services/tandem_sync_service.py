@@ -1,28 +1,40 @@
 """
-Tandem Sync Service - Fetches basal data from Tandem pump.
+Tandem Sync Service - Fetches pump data from Tandem and pushes to Gluroo + CosmosDB.
 
 Data flow:
-  Boluses:  Pump -> Gluroo (native) -> CosmosDB (via Gluroo sync)
-  Basal:    Pump -> Tandem API -> CosmosDB (direct, Gluroo doesn't track basal)
+  Basal:            Tandem API -> CosmosDB (direct, Gluroo doesn't track basal)
+  Bolus + Carbs:    Tandem API -> Gluroo (Nightscout API) -> CosmosDB (via Gluroo sync)
 
-Tandem sync only writes BASAL to CosmosDB. Gluroo already captures all
-bolus/auto-correction data natively from the pump — no push needed.
+Bolus/carb data is pushed to Gluroo so it appears in the Gluroo mobile app
+and gets picked up by the normal Gluroo sync into CosmosDB.
 """
+import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
+
+import httpx
 
 from services.tandem import (
     TandemApiAdapter,
     aggregate_basal_events,
     map_bolus_events,
 )
+from services.tandem.t1dai_models import T1DAITreatment
 
 logger = logging.getLogger(__name__)
 
+# Nightscout event type mapping for Gluroo push
+_EVENT_TYPE_MAP = {
+    "insulin": "Correction Bolus",
+    "auto_correction": "Correction Bolus",
+    "basal": "Temp Basal",
+    "carbs": "Carb Correction",
+}
+
 
 class TandemSyncService:
-    """Fetches Tandem pump data. Writes only basal to CosmosDB."""
+    """Fetches Tandem pump data. Writes basal to CosmosDB, bolus/carbs to Gluroo."""
 
     def __init__(self):
         self._treatment_repo = None
@@ -41,12 +53,14 @@ class TandemSyncService:
         user_id: str,
         since: datetime,
         until: Optional[datetime] = None,
+        gluroo_url: Optional[str] = None,
+        gluroo_api_secret: Optional[str] = None,
     ) -> dict:
         """
         Run one sync cycle for a single Tandem data source.
 
-        Only writes basal treatments to CosmosDB.
-        Boluses are already in Gluroo and synced via Gluroo sync.
+        - Basal treatments -> CosmosDB directly
+        - Bolus/carb treatments -> Gluroo (if credentials provided)
         """
         until = until or datetime.now(timezone.utc)
         logger.info(f"Tandem sync for {user_id}: {since.isoformat()} to {until.isoformat()}")
@@ -62,12 +76,7 @@ class TandemSyncService:
         bolus_count = sum(1 for t in bolus_treatments if t.type != "carbs")
         carb_count = sum(1 for t in bolus_treatments if t.type == "carbs")
 
-        if not basal_treatments:
-            logger.info(f"Tandem sync for {user_id}: no new basal treatments")
-            return {"basal": 0, "bolus": bolus_count, "carbs": carb_count,
-                    "total": bolus_count + carb_count, "gluroo": 0}
-
-        # Write only basal to CosmosDB (Gluroo handles boluses)
+        # Write basal to CosmosDB (Gluroo doesn't track basal)
         basal_count = 0
         for t in basal_treatments:
             try:
@@ -76,11 +85,18 @@ class TandemSyncService:
             except Exception as e:
                 logger.warning(f"Failed to upsert basal treatment {t.id}: {e}")
 
+        # Push bolus/carb treatments to Gluroo so they appear in the mobile app
+        gluroo_count = 0
+        if gluroo_url and gluroo_api_secret and bolus_treatments:
+            gluroo_count = self._push_to_gluroo(
+                bolus_treatments, gluroo_url, gluroo_api_secret
+            )
+
         total = basal_count + bolus_count + carb_count
         logger.info(
             f"Tandem sync complete for {user_id}: "
             f"{basal_count} basal -> CosmosDB, "
-            f"{bolus_count} bolus + {carb_count} carbs (via Gluroo)"
+            f"{gluroo_count}/{len(bolus_treatments)} bolus+carbs -> Gluroo"
         )
 
         return {
@@ -88,8 +104,77 @@ class TandemSyncService:
             "bolus": bolus_count,
             "carbs": carb_count,
             "total": total,
-            "gluroo": 0,
+            "gluroo": gluroo_count,
         }
+
+    def _push_to_gluroo(
+        self,
+        treatments: List[T1DAITreatment],
+        gluroo_url: str,
+        api_secret: str,
+    ) -> int:
+        """Push bolus/carb treatments to Gluroo via Nightscout API."""
+        secret_hash = hashlib.sha1(api_secret.encode()).hexdigest()
+        headers = {
+            "API-SECRET": secret_hash,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        pushed = 0
+        for treatment in treatments:
+            ns_entry = self._to_nightscout_entry(treatment)
+            if ns_entry is None:
+                continue
+            try:
+                with httpx.Client(timeout=10) as client:
+                    resp = client.post(
+                        f"{gluroo_url.rstrip('/')}/api/v1/treatments",
+                        json=ns_entry,
+                        headers=headers,
+                    )
+                    resp.raise_for_status()
+                    pushed += 1
+            except httpx.HTTPStatusError as e:
+                logger.warning(
+                    f"Gluroo push failed for {treatment.sourceId}: "
+                    f"{e.response.status_code} {e.response.text[:200]}"
+                )
+            except Exception as e:
+                logger.warning(f"Gluroo push error for {treatment.sourceId}: {e}")
+
+        if pushed > 0:
+            logger.info(f"Pushed {pushed}/{len(treatments)} treatments to Gluroo")
+        return pushed
+
+    @staticmethod
+    def _to_nightscout_entry(treatment: T1DAITreatment) -> Optional[dict]:
+        """Convert T1DAITreatment to Nightscout treatment format."""
+        event_type = _EVENT_TYPE_MAP.get(treatment.type)
+        if event_type is None:
+            return None
+
+        entry = {
+            "eventType": event_type,
+            "created_at": treatment.timestamp,
+            "enteredBy": "tandem-sync",
+            "notes": treatment.notes or "",
+        }
+
+        if treatment.type == "basal":
+            entry["duration"] = treatment.durationMinutes or 60
+            entry["rate"] = treatment.basalRate or 0
+            entry["absolute"] = treatment.basalRate or 0
+            if treatment.insulin:
+                entry["insulin"] = treatment.insulin
+        elif treatment.type in ("insulin", "auto_correction"):
+            entry["insulin"] = treatment.insulin
+            if treatment.bolusType:
+                entry["notes"] = f"[{treatment.bolusType}] {entry['notes']}".strip()
+        elif treatment.type == "carbs":
+            entry["carbs"] = treatment.carbs
+
+        return entry
 
     async def test_connection(self, email: str, password: str) -> tuple[bool, str]:
         """Test Tandem API credentials."""

@@ -563,6 +563,18 @@ async def sync_tandem(
             item["lastSyncAt"].replace("Z", "+00:00")
         ) - timedelta(hours=1)
 
+    # Look up Gluroo credentials so Tandem sync can push bolus/carbs to Gluroo
+    gluroo_url = None
+    gluroo_api_secret = None
+    try:
+        gluroo_ds = await datasource_repo.get(user_id, "gluroo")
+        if gluroo_ds and gluroo_ds.credentials and gluroo_ds.credentials.apiSecretEncrypted:
+            from utils.encryption import decrypt_secret as decrypt_gluroo
+            gluroo_url = gluroo_ds.credentials.url
+            gluroo_api_secret = decrypt_gluroo(gluroo_ds.credentials.apiSecretEncrypted)
+    except Exception as e:
+        logger.warning(f"Could not look up Gluroo credentials for Tandem push: {e}")
+
     service = TandemSyncService()
     try:
         result = await service.sync_for_source(
@@ -570,6 +582,8 @@ async def sync_tandem(
             password=password,
             user_id=user_id,
             since=since,
+            gluroo_url=gluroo_url,
+            gluroo_api_secret=gluroo_api_secret,
         )
 
         # Update last sync timestamp

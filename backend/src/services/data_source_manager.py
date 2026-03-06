@@ -514,12 +514,31 @@ class DataSourceManager:
             since = source.lastSyncAt - timedelta(minutes=5) if source.lastSyncAt else \
                 datetime.now(timezone.utc) - timedelta(days=7)
 
+            # Look up Gluroo credentials for this profile so we can push bolus/carbs
+            gluroo_url = None
+            gluroo_api_secret = None
+            try:
+                gluroo_sources = await self.source_repo.get_by_profile(
+                    profile.id, profile.accountId
+                )
+                for gs in gluroo_sources:
+                    if gs.sourceType == DataSourceType.GLUROO and gs.isActive:
+                        gluroo_creds = self._get_gluroo_credentials(gs)
+                        if gluroo_creds:
+                            gluroo_url = gluroo_creds.url
+                            gluroo_api_secret = gluroo_creds.api_secret
+                            break
+            except Exception as e:
+                logger.warning(f"Could not look up Gluroo credentials for Tandem push: {e}")
+
             tandem_service = TandemSyncService()
             result = await tandem_service.sync_for_source(
                 email=credentials.email,
                 password=credentials.password,
                 user_id=profile.accountId,
                 since=since,
+                gluroo_url=gluroo_url,
+                gluroo_api_secret=gluroo_api_secret,
             )
 
             treatment_count = result.get("total", 0)
