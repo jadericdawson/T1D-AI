@@ -49,6 +49,8 @@ class TreatmentType(str, Enum):
     CARBS = "carbs"
     CORRECTION_BOLUS = "Correction Bolus"
     CARB_CORRECTION = "Carb Correction"
+    BASAL = "basal"
+    AUTO_CORRECTION = "auto_correction"
 
 
 # ==================== Glucose Models ====================
@@ -197,6 +199,13 @@ class Treatment(BaseModel):
         None,
         description="When this treatment was inferred by the ML system"
     )
+
+    # Pump-specific fields (populated by tandem-sync for pump data)
+    basalRate: Optional[float] = Field(None, description="Basal rate in U/hr at delivery time")
+    bolusType: Optional[str] = Field(None, description="standard|extended|combo|auto_correction")
+    deliveryMethod: Optional[str] = Field(None, description="pump_basal|pump_bolus|pump_auto_correction|injection")
+    pumpSource: Optional[str] = Field(None, description="tandem_mobi|omnipod5|medtronic etc.")
+    durationMinutes: Optional[int] = Field(None, description="Duration for basal windows or extended boluses")
 
     # User edit tracking (prevents Gluroo sync from overwriting)
     userEdited: bool = Field(
@@ -926,6 +935,7 @@ class DataSourceType(str, Enum):
     DEXCOM = "dexcom"
     NIGHTSCOUT = "nightscout"
     TIDEPOOL = "tidepool"
+    TANDEM = "tandem"
     MANUAL = "manual"
 
 

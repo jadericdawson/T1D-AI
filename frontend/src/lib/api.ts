@@ -358,7 +358,7 @@ export interface Treatment {
   protein?: number
   fat?: number
   notes?: string
-  source?: string             // 'manual', 'gluroo', etc.
+  source?: string             // 'manual', 'gluroo', 'tandem', etc.
   // AI glycemic prediction fields
   glycemicIndex?: number      // 0-100 precise value from GI database or GPT
   glycemicLoad?: number       // carbs * GI / 100
@@ -366,6 +366,12 @@ export interface Treatment {
   fatContent?: 'none' | 'low' | 'medium' | 'high'
   isLiquid?: boolean          // True for drinks - absorb 40% faster
   enrichedAt?: string         // When food was analyzed by AI
+  // Pump-specific fields (from tandem-sync)
+  basalRate?: number          // Basal rate in U/hr
+  bolusType?: 'standard' | 'extended' | 'combo' | 'auto_correction'
+  deliveryMethod?: 'pump_basal' | 'pump_bolus' | 'pump_auto_correction' | 'injection'
+  pumpSource?: string         // 'tandem_mobi', etc.
+  durationMinutes?: number    // Duration for basal windows or extended boluses
 }
 
 export interface TreatmentCreate {
@@ -1503,6 +1509,34 @@ export const datasourcesApi = {
     isOwner: boolean
   }> => {
     const response = await api.get('/datasources/gluroo/defaults')
+    return response.data
+  },
+
+  // Tandem endpoints
+  connectTandem: async (email: string, password: string) => {
+    const response = await api.post('/datasources/tandem/connect', { email, password })
+    return response.data
+  },
+
+  testTandem: async (email: string, password: string) => {
+    const response = await api.post('/datasources/tandem/test', { email, password })
+    return response.data
+  },
+
+  disconnectTandem: async () => {
+    const response = await api.delete('/datasources/tandem')
+    return response.data
+  },
+
+  getTandemStatus: async () => {
+    const response = await api.get('/datasources/tandem/status')
+    return response.data
+  },
+
+  syncTandem: async (fullSync: boolean = false) => {
+    const response = await api.post('/datasources/tandem/sync', null, {
+      params: { full_sync: fullSync }
+    })
     return response.data
   },
 }

@@ -12,6 +12,7 @@ Supports both:
 import asyncio
 import hashlib
 import logging
+import os
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
@@ -96,7 +97,50 @@ class GlurooSyncService:
         self.isf_learner = EnhancedISFLearner() if ISF_LEARNING_AVAILABLE else None
         self.last_isf_learning: Optional[datetime] = None
         self.isf_learning_interval_hours = 6  # Re-learn ISF every 6 hours
+
+        # Tandem pump awareness: when True, skip Gluroo insulin (pump is ground truth)
+        self._tandem_active: Optional[bool] = None
+        self._tandem_check_time: Optional[datetime] = None
         self.historic_data_imported = False  # Track if historic data has been imported
+
+    def _is_tandem_active(self) -> bool:
+        """Check if Tandem pump data source is active (has recent data).
+
+        Caches the result for 30 minutes to avoid repeated queries.
+        When active, Gluroo sync skips insulin treatments (pump is ground truth).
+        """
+        now = datetime.now(timezone.utc)
+        if self._tandem_active is not None and self._tandem_check_time:
+            if (now - self._tandem_check_time).total_seconds() < 1800:
+                return self._tandem_active
+
+        try:
+            # Check for any Tandem-source treatment in last 24 hours
+            since = (now - timedelta(hours=24)).isoformat()
+            query = """
+                SELECT TOP 1 c.id FROM c
+                WHERE c.userId = @userId AND c.source = 'tandem'
+                  AND c.timestamp >= @since
+            """
+            items = list(self.treatment_container.query_items(
+                query=query,
+                parameters=[
+                    {"name": "@userId", "value": USER_ID},
+                    {"name": "@since", "value": since},
+                ],
+                partition_key=USER_ID,
+                max_item_count=1,
+            ))
+            self._tandem_active = len(items) > 0
+            self._tandem_check_time = now
+            if self._tandem_active:
+                logger.info("Tandem pump active: Gluroo insulin treatments will be skipped")
+            return self._tandem_active
+        except Exception as e:
+            logger.warning(f"Failed to check Tandem status: {e}")
+            self._tandem_active = False
+            self._tandem_check_time = now
+            return False
 
     def _get_last_sync_time(self) -> int:
         """Get the timestamp of the most recent glucose reading in CosmosDB."""
@@ -162,14 +206,23 @@ class GlurooSyncService:
 
     def parse_treatment(self, entry: dict) -> Optional[dict]:
         """Parse Gluroo treatment to CosmosDB format."""
-        # Skip treatments that originated from T1D-AI to prevent duplicates
+        # Skip treatments that originated from T1D-AI or tandem-sync to prevent duplicates
         entered_by = entry.get('enteredBy', '')
         if entered_by == 'T1D-AI':
             logger.debug(f"Skipping T1D-AI originated treatment to prevent duplicate")
             return None
+        if entered_by == 'tandem-sync':
+            logger.debug(f"Skipping tandem-sync originated treatment to prevent circular re-import")
+            return None
 
         insulin = entry.get('insulin')
         carbs = entry.get('carbs')
+
+        # When Tandem pump is active, skip insulin from Gluroo (pump is ground truth)
+        # Keep carb/food treatments - they often have richer descriptions from Gluroo
+        if insulin and float(insulin) > 0 and not carbs and self._is_tandem_active():
+            logger.debug(f"Skipping Gluroo insulin (Tandem pump is ground truth)")
+            return None
 
         if not insulin and not carbs:
             return None

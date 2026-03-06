@@ -49,12 +49,11 @@ import {
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { cn, formatTime } from '@/lib/utils'
+import { formatDateTimeLocal as formatDateTimeLocalTz } from '@/utils/timezone'
 
-// Helper: Convert UTC ISO timestamp to datetime-local format (local time)
+// Helper: Convert UTC ISO timestamp to datetime-local format using user's timezone
 const formatDateTimeLocal = (isoTimestamp: string): string => {
-  const date = new Date(isoTimestamp)
-  const pad = (n: number) => n.toString().padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return formatDateTimeLocalTz(isoTimestamp)
 }
 
 // Helper: Parse datetime-local (local time) to UTC ISO string
@@ -174,6 +173,7 @@ export default function Dashboard() {
   const user = useAuthStore(state => state.user)
   const activeProfileId = useAuthStore(state => state.activeProfileId)
   const managedProfiles = useAuthStore(state => state.managedProfiles)
+  const userTimezone = useAuthStore(state => state.timezone)
 
   // Compute effective userId - MUST match getEffectiveProfileId logic for managed profiles
   // Priority: viewingUserId (shared) > activeProfileId (managed child) > user?.id (self)
@@ -372,7 +372,7 @@ export default function Dashboard() {
   const cob = latestData?.metrics?.cob ?? currentData?.metrics?.cob ?? 0
   const pob = latestData?.metrics?.pob ?? currentData?.metrics?.pob ?? 0
   const isf = latestData?.metrics?.isf ?? currentData?.metrics?.isf ?? 50
-  const recommendedDose = currentData?.metrics?.recommendedDose ?? 0
+  const recommendedDose = latestData?.metrics?.recommendedDose ?? currentData?.metrics?.recommendedDose ?? 0
 
   // Food recommendation data (when BG predicted low)
   const actionType = (latestData?.metrics?.actionType ?? currentData?.metrics?.actionType ?? 'none') as 'insulin' | 'food' | 'none'
@@ -432,10 +432,13 @@ export default function Dashboard() {
   // Deduplicate: when a treatment is edited, prefer the one with more complete notes
   const safeTreatmentsData = Array.isArray(treatmentsData) ? treatmentsData : []
   const deduplicatedTreatments = safeTreatmentsData.reduce((acc, t) => {
-    // Create a key based on timestamp (to minute) + type + value
+    // Create a key based on timestamp (to minute) + normalized type + value
     const timeKey = new Date(t.timestamp).toISOString().slice(0, 16) // YYYY-MM-DDTHH:MM
-    const value = t.type === 'insulin' ? t.insulin : t.carbs
-    const key = `${timeKey}_${t.type}_${value}`
+    const isInsulinType = t.type === 'insulin' || t.type === 'Correction Bolus'
+      || t.type === 'auto_correction' || t.type === 'basal'
+    const normalType = isInsulinType ? 'insulin' : 'carbs'
+    const value = isInsulinType ? t.insulin : t.carbs
+    const key = `${timeKey}_${normalType}_${value}`
 
     // If we already have this treatment, keep the one with longer notes (edited version)
     const existing = acc.get(key)
@@ -448,14 +451,16 @@ export default function Dashboard() {
   const recentTreatments = Array.from(deduplicatedTreatments.values())
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
     .map((t) => {
-      // Normalize type: 'Correction Bolus' → 'insulin', 'Carb Correction' → 'carbs'
+      // Normalize type: 'Correction Bolus', 'auto_correction', 'basal' → 'insulin'
+      //                 'Carb Correction' → 'carbs'
       const isInsulin = t.type === 'insulin' || t.type === 'Correction Bolus'
+        || t.type === 'auto_correction' || t.type === 'basal'
       const normalizedType = isInsulin ? 'insulin' : 'carbs'
       return {
         id: t.id,
         type: normalizedType,
         value: isInsulin ? t.insulin : t.carbs,
-        time: formatTime(t.timestamp),
+        time: formatTime(t.timestamp, userTimezone),
         timestamp: t.timestamp,
         notes: t.notes,
         // Full macro data from Gluroo
@@ -468,7 +473,11 @@ export default function Dashboard() {
         fatContent: t.fatContent,
         isLiquid: t.isLiquid,
         enrichedAt: t.enrichedAt,
-        source: t.source
+        source: t.source,
+        // Pump fields
+        bolusType: (t as any).bolusType,
+        deliveryMethod: (t as any).deliveryMethod,
+        basalRate: (t as any).basalRate,
       }
     })
 
@@ -489,9 +498,10 @@ export default function Dashboard() {
   // Format treatments for chart - handle all treatment types
   // Include notes and isLiquid for food emoji selection
   const chartTreatments = safeTreatmentsData.map((t) => {
-    // Normalize type: 'insulin' and 'Correction Bolus' → 'insulin'
+    // Normalize type: 'insulin', 'Correction Bolus', 'auto_correction', 'basal' → 'insulin'
     //                 'carbs' and 'Carb Correction' → 'carbs'
     const isInsulin = t.type === 'insulin' || t.type === 'Correction Bolus'
+      || t.type === 'auto_correction' || t.type === 'basal'
     const normalizedType = isInsulin ? 'insulin' : 'carbs'
     return {
       timestamp: t.timestamp,
@@ -591,14 +601,16 @@ export default function Dashboard() {
           <Clock className="w-4 h-4 text-cyan" />
           <span className="font-mono text-lg">
             {currentTime.toLocaleTimeString('en-US', {
-              timeZone: 'America/New_York',
+              timeZone: userTimezone,
               hour: '2-digit',
               minute: '2-digit',
               second: '2-digit',
               hour12: true
             })}
           </span>
-          <span className="text-xs text-gray-500">EST</span>
+          <span className="text-xs text-gray-500">
+            {new Intl.DateTimeFormat('en-US', { timeZone: userTimezone, timeZoneName: 'short' }).formatToParts(currentTime).find(p => p.type === 'timeZoneName')?.value || ''}
+          </span>
         </div>
 
         <div className="flex items-center gap-3">
@@ -1024,6 +1036,12 @@ export default function Dashboard() {
                       <div className="flex items-center gap-3">
                         {treatment.type === 'carbs' ? (
                           <span className="text-2xl">{treatment.isLiquid ? '🥤' : '🍎'}</span>
+                        ) : (treatment as any).deliveryMethod === 'pump_auto_correction' ? (
+                          <span className="text-2xl" title="Auto correction (Control-IQ)">🤖</span>
+                        ) : (treatment as any).deliveryMethod === 'pump_basal' ? (
+                          <span className="text-2xl" title="Basal delivery">⏳</span>
+                        ) : (treatment as any).deliveryMethod === 'pump_bolus' ? (
+                          <span className="text-2xl" title="Pump bolus">💊</span>
                         ) : (
                           <span className="text-2xl">💉</span>
                         )}
@@ -1091,7 +1109,7 @@ export default function Dashboard() {
                           </div>
                         )}
                         {/* GI enrichment data */}
-                        {treatment.glycemicIndex !== undefined && (
+                        {treatment.glycemicIndex != null && treatment.glycemicIndex > 0 && (
                           <span className={cn(
                             "px-1.5 py-0.5 rounded",
                             treatment.glycemicIndex >= 70 ? "bg-red-900/30 text-red-400" :
@@ -1392,7 +1410,7 @@ export default function Dashboard() {
           {/* Last Sync Info - No animation */}
           {currentTimestamp && (
             <div className="text-center text-sm text-gray-500">
-              Last updated: {formatTime(currentTimestamp)}
+              Last updated: {formatTime(currentTimestamp, userTimezone)}
             </div>
           )}
         </div>

@@ -56,7 +56,7 @@ const fadeIn = {
 const TABS = [
   { id: 'profile', label: 'Profile', icon: User },
   { id: 'profiles', label: 'Profiles', icon: Users },
-  { id: 'datasource', label: 'Gluroo', icon: Link2 },
+  { id: 'datasource', label: 'Data Sources', icon: Link2 },
   { id: 'insulin', label: 'Insulin', icon: Droplet },
   { id: 'alerts', label: 'Alerts', icon: Bell },
   { id: 'sharing', label: 'Sharing', icon: Share2 },
@@ -74,6 +74,7 @@ export default function Settings() {
   // Auth store
   const user = useAuthStore(state => state.user)
   const logout = useAuthStore(state => state.logout)
+  const setTimezone = useAuthStore(state => state.setTimezone)
   const userId = user?.id || ''
 
   // Get active tab from URL or default
@@ -100,6 +101,10 @@ export default function Settings() {
     glurooUrl: '',
     glurooApiSecret: '',
     syncInterval: 5,
+
+    // Data Source (Tandem)
+    tandemEmail: '',
+    tandemPassword: '',
 
     // Insulin Settings
     targetBg: preferences.targetBg,
@@ -135,6 +140,8 @@ export default function Settings() {
 
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle')
   const [glurooStatus, setGlurooStatus] = useState<'idle' | 'testing' | 'success' | 'error' | 'syncing'>('idle')
+  const [tandemStatus, setTandemStatus] = useState<'idle' | 'testing' | 'success' | 'error' | 'syncing'>('idle')
+  const [tandemConnected, setTandemConnected] = useState(false)
 
   // Fetch user settings
   const { data: userSettings, isLoading: isLoadingSettings } = useQuery({
@@ -152,6 +159,14 @@ export default function Settings() {
     retry: false,
   })
 
+  // Fetch Tandem connection status
+  const { data: tandemStatusData } = useQuery({
+    queryKey: ['tandem', 'status', userId],
+    queryFn: () => datasourcesApi.getTandemStatus(),
+    enabled: !!userId,
+    retry: false,
+  })
+
   // Auto-fill Gluroo credentials when defaults load
   useEffect(() => {
     if (glurooDefaults && glurooDefaults.isOwner && !formState.glurooUrl) {
@@ -163,6 +178,13 @@ export default function Settings() {
       }))
     }
   }, [glurooDefaults])
+
+  // Update Tandem connected state
+  useEffect(() => {
+    if (tandemStatusData) {
+      setTandemConnected(tandemStatusData.connected)
+    }
+  }, [tandemStatusData])
 
   // Update form state when settings load
   useEffect(() => {
@@ -203,6 +225,7 @@ export default function Settings() {
         showInsights: formState.showInsights,
         useTFTModifiers: formState.useTFTModifiers,
         trackPredictionAccuracy: formState.trackPredictionAccuracy,
+        timezone: formState.timezone,
       })
       updatePreferences({
         targetBg: formState.targetBg,
@@ -214,6 +237,10 @@ export default function Settings() {
         enablePredictiveAlerts: formState.predictiveAlerts,
         darkMode: formState.darkMode,
       })
+      // Persist timezone preference to auth store
+      if (formState.timezone) {
+        setTimezone(formState.timezone)
+      }
     },
     onSuccess: () => {
       setSaveStatus('success')
@@ -231,7 +258,6 @@ export default function Settings() {
     if (!formState.glurooUrl || !formState.glurooApiSecret) return
     setGlurooStatus('testing')
     try {
-      await datasourcesApi.connectGluroo(formState.glurooUrl, formState.glurooApiSecret)
       await datasourcesApi.testGluroo(formState.glurooUrl, formState.glurooApiSecret)
       setGlurooStatus('success')
       setTimeout(() => setGlurooStatus('idle'), 2000)
@@ -252,6 +278,66 @@ export default function Settings() {
     } catch {
       setGlurooStatus('error')
       setTimeout(() => setGlurooStatus('idle'), 3000)
+    }
+  }
+
+  // Tandem handlers
+  const handleTestTandem = async () => {
+    if (!formState.tandemEmail || !formState.tandemPassword) return
+    setTandemStatus('testing')
+    try {
+      const result = await datasourcesApi.testTandem(formState.tandemEmail, formState.tandemPassword)
+      if (result.success) {
+        setTandemStatus('success')
+        setTimeout(() => setTandemStatus('idle'), 2000)
+      } else {
+        setTandemStatus('error')
+        setTimeout(() => setTandemStatus('idle'), 3000)
+      }
+    } catch {
+      setTandemStatus('error')
+      setTimeout(() => setTandemStatus('idle'), 3000)
+    }
+  }
+
+  const handleConnectTandem = async () => {
+    if (!formState.tandemEmail || !formState.tandemPassword) return
+    setTandemStatus('testing')
+    try {
+      await datasourcesApi.connectTandem(formState.tandemEmail, formState.tandemPassword)
+      setTandemStatus('success')
+      setTandemConnected(true)
+      queryClient.invalidateQueries({ queryKey: ['tandem', 'status'] })
+      setTimeout(() => setTandemStatus('idle'), 2000)
+    } catch {
+      setTandemStatus('error')
+      setTimeout(() => setTandemStatus('idle'), 3000)
+    }
+  }
+
+  const handleDisconnectTandem = async () => {
+    try {
+      await datasourcesApi.disconnectTandem()
+      setTandemConnected(false)
+      setFormState(prev => ({ ...prev, tandemEmail: '', tandemPassword: '' }))
+      queryClient.invalidateQueries({ queryKey: ['tandem', 'status'] })
+    } catch {
+      setTandemStatus('error')
+      setTimeout(() => setTandemStatus('idle'), 3000)
+    }
+  }
+
+  const handleSyncTandem = async () => {
+    setTandemStatus('syncing')
+    try {
+      await datasourcesApi.syncTandem()
+      setTandemStatus('success')
+      queryClient.invalidateQueries({ queryKey: ['glucose'] })
+      queryClient.invalidateQueries({ queryKey: ['treatments'] })
+      setTimeout(() => setTandemStatus('idle'), 2000)
+    } catch {
+      setTandemStatus('error')
+      setTimeout(() => setTandemStatus('idle'), 3000)
     }
   }
 
@@ -548,6 +634,114 @@ export default function Settings() {
                       Gluroo Support
                     </a>
                   </p>
+                </CardContent>
+              </Card>
+
+              {/* Tandem Source Connection */}
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle className="flex items-center gap-2">
+                        <Activity className="w-5 h-5 text-purple-500" />
+                        Tandem Pump Connection
+                      </CardTitle>
+                      <CardDescription>
+                        Connect your Tandem t:connect account to sync pump data (basal, bolus, carbs)
+                      </CardDescription>
+                    </div>
+                    {tandemConnected && (
+                      <Badge className="bg-green-500/20 text-green-600 border-green-500/30">
+                        Connected
+                      </Badge>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-6">
+                  <div className="space-y-4">
+                    <div>
+                      <Label>Tandem Email</Label>
+                      <Input
+                        type="email"
+                        value={formState.tandemEmail}
+                        onChange={(e) => updateField('tandemEmail', e.target.value)}
+                        placeholder="your@email.com"
+                        className="mt-1"
+                        disabled={tandemConnected}
+                      />
+                    </div>
+                    <div>
+                      <Label>Tandem Password</Label>
+                      <Input
+                        type="password"
+                        value={formState.tandemPassword}
+                        onChange={(e) => updateField('tandemPassword', e.target.value)}
+                        placeholder="Enter your Tandem password"
+                        className="mt-1"
+                        disabled={tandemConnected}
+                      />
+                    </div>
+
+                    <div className="flex gap-3 pt-2">
+                      {!tandemConnected ? (
+                        <>
+                          <Button
+                            variant="outline"
+                            onClick={handleTestTandem}
+                            disabled={tandemStatus === 'testing' || !formState.tandemEmail || !formState.tandemPassword}
+                          >
+                            {tandemStatus === 'testing' && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                            {tandemStatus === 'success' && <Check className="w-4 h-4 mr-2 text-green-500" />}
+                            {tandemStatus === 'error' && <AlertCircle className="w-4 h-4 mr-2 text-red-500" />}
+                            <Wifi className="w-4 h-4 mr-2" />
+                            Test Connection
+                          </Button>
+                          <Button
+                            onClick={handleConnectTandem}
+                            disabled={tandemStatus === 'testing' || !formState.tandemEmail || !formState.tandemPassword}
+                          >
+                            {tandemStatus === 'testing' && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                            Connect
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Button
+                            variant="outline"
+                            onClick={handleSyncTandem}
+                            disabled={tandemStatus === 'syncing'}
+                          >
+                            {tandemStatus === 'syncing' && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                            <RefreshCw className="w-4 h-4 mr-2" />
+                            Sync Now
+                          </Button>
+                          <Button
+                            variant="destructive"
+                            onClick={handleDisconnectTandem}
+                          >
+                            <Trash2 className="w-4 h-4 mr-2" />
+                            Disconnect
+                          </Button>
+                        </>
+                      )}
+                    </div>
+
+                    {tandemStatus === 'success' && (
+                      <Badge className="bg-green-500/20 text-green-600 border-green-500/30">
+                        {tandemConnected ? 'Synced successfully' : 'Connected successfully'}
+                      </Badge>
+                    )}
+                    {tandemStatus === 'error' && (
+                      <Badge className="bg-red-500/20 text-red-600 border-red-500/30">
+                        {tandemConnected ? 'Sync failed' : 'Connection failed - check credentials'}
+                      </Badge>
+                    )}
+                    {tandemStatusData?.lastSyncAt && (
+                      <p className="text-xs text-muted-foreground">
+                        Last synced: {new Date(tandemStatusData.lastSyncAt).toLocaleString()}
+                      </p>
+                    )}
+                  </div>
                 </CardContent>
               </Card>
             </motion.div>

@@ -44,10 +44,10 @@ const dataSources: DataSource[] = [
   },
   {
     id: 'tandem_tconnect',
-    name: 'Tandem t:connect',
+    name: 'Tandem Source',
     logo: '💉',
-    description: 'Tandem t:slim X2 pump data',
-    status: 'coming_soon',
+    description: 'Tandem Mobi / t:slim X2 pump data',
+    status: 'active',
     website: 'https://tandemdiabetes.com',
   },
   {

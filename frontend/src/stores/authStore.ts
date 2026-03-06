@@ -105,6 +105,9 @@ interface AuthState {
   isLoading: boolean
   error: string | null
 
+  // User timezone preference (IANA timezone string)
+  timezone: string
+
   // Viewing another user's data (for shared access)
   viewingUserId: string | null
   viewingUser: SharedUser | null
@@ -138,6 +141,7 @@ interface AuthState {
 
   // User state updates
   setOnboardingCompleted: (completed: boolean) => void
+  setTimezone: (timezone: string) => void
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -148,6 +152,9 @@ export const useAuthStore = create<AuthState>()(
       isAuthenticated: false,
       isLoading: false,
       error: null,
+
+      // Default timezone from browser
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
 
       // Sharing state
       viewingUserId: null,
@@ -477,6 +484,10 @@ export const useAuthStore = create<AuthState>()(
           })
         }
       },
+
+      setTimezone: (timezone: string) => {
+        set({ timezone })
+      },
     }),
     {
       name: 't1d-ai-auth',
@@ -484,6 +495,7 @@ export const useAuthStore = create<AuthState>()(
         user: state.user,
         tokens: state.tokens,
         isAuthenticated: state.isAuthenticated,
+        timezone: state.timezone,
         viewingUserId: state.viewingUserId,
         viewingUser: state.viewingUser,
         sharedWithMe: state.sharedWithMe,

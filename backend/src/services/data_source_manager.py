@@ -24,7 +24,15 @@ from database.repositories import (
     GlucoseRepository,
     TreatmentRepository
 )
-from utils.encryption import decrypt_value
+from utils.encryption import decrypt_secret as decrypt_value
+
+# Import food enrichment service for GI prediction
+try:
+    from services.food_enrichment_service import food_enrichment_service
+    ENRICHMENT_AVAILABLE = True
+except ImportError:
+    ENRICHMENT_AVAILABLE = False
+    food_enrichment_service = None
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +63,13 @@ class DexcomCredentials:
     expires_at: Optional[datetime] = None
 
 
+@dataclass
+class TandemCredentials:
+    """Decrypted Tandem Source credentials."""
+    email: str
+    password: str
+
+
 class DataSourceManager:
     """
     Manages data synchronization for profiles with multiple data sources.
@@ -75,10 +90,12 @@ class DataSourceManager:
     def _decrypt_credentials(self, source: ProfileDataSource) -> Optional[Dict[str, Any]]:
         """Decrypt credentials for a data source."""
         try:
-            decrypted_json = decrypt_value(source.credentialsEncrypted)
-            return json.loads(decrypted_json)
+            # Credentials are stored as JSON with encrypted fields inside
+            # NOT as fully encrypted JSON
+            creds = json.loads(source.credentialsEncrypted)
+            return creds
         except Exception as e:
-            logger.error(f"Failed to decrypt credentials for {source.id}: {e}")
+            logger.error(f"Failed to parse credentials for {source.id}: {e}")
             return None
 
     def _get_gluroo_credentials(self, source: ProfileDataSource) -> Optional[GlurooCredentials]:
@@ -87,10 +104,21 @@ class DataSourceManager:
         if not creds:
             return None
 
-        return GlurooCredentials(
-            url=creds.get('url', ''),
-            api_secret=creds.get('apiSecret', creds.get('api_secret', ''))
-        )
+        # API secret is encrypted inside the JSON - decrypt it
+        encrypted_secret = creds.get('apiSecret', creds.get('api_secret', ''))
+        if not encrypted_secret:
+            logger.error(f"No API secret found in credentials for {source.id}")
+            return None
+
+        try:
+            decrypted_secret = decrypt_value(encrypted_secret)
+            return GlurooCredentials(
+                url=creds.get('url', ''),
+                api_secret=decrypted_secret
+            )
+        except Exception as e:
+            logger.error(f"Failed to decrypt API secret for {source.id}: {e}")
+            return None
 
     def _get_dexcom_credentials(self, source: ProfileDataSource) -> Optional[DexcomCredentials]:
         """Get Dexcom credentials from a data source."""
@@ -139,6 +167,25 @@ class DataSourceManager:
 
         return results
 
+    def _get_tandem_credentials(self, source: ProfileDataSource) -> Optional[TandemCredentials]:
+        """Get Tandem Source credentials from a data source."""
+        creds = self._decrypt_credentials(source)
+        if not creds:
+            return None
+
+        email = creds.get('email', '')
+        encrypted_password = creds.get('password', '')
+        if not email or not encrypted_password:
+            logger.error(f"Missing email or password in Tandem credentials for {source.id}")
+            return None
+
+        try:
+            decrypted_password = decrypt_value(encrypted_password)
+            return TandemCredentials(email=email, password=decrypted_password)
+        except Exception as e:
+            logger.error(f"Failed to decrypt Tandem password for {source.id}: {e}")
+            return None
+
     async def sync_source(
         self,
         source: ProfileDataSource,
@@ -156,6 +203,8 @@ class DataSourceManager:
                 return await self._sync_dexcom(source, profile)
             elif source.sourceType == DataSourceType.NIGHTSCOUT:
                 return await self._sync_nightscout(source, profile)
+            elif source.sourceType == DataSourceType.TANDEM:
+                return await self._sync_tandem(source, profile)
             else:
                 return SyncResult(
                     success=False,
@@ -215,35 +264,97 @@ class DataSourceManager:
         )
 
         try:
-            # Determine sync window
-            # If we have a last sync time, only fetch since then
-            # Otherwise, fetch last 24 hours
+            # Determine sync window with intelligent gap detection
+            # If we have a last sync time, check for gaps
             if source.lastSyncAt:
-                since = source.lastSyncAt - timedelta(minutes=5)  # 5 min overlap for safety
+                # Calculate gap since last sync
+                gap_hours = (datetime.now(timezone.utc) - source.lastSyncAt).total_seconds() / 3600
+
+                # AUTO-DETECT GAPS: If >48 hours since last sync, do full 7-day backfill
+                if gap_hours > 48:
+                    logger.warning(
+                        f"[{profile.displayName}] GAP DETECTED: {gap_hours:.1f} hours since last sync "
+                        f"(last: {source.lastSyncAt}) - triggering full 7-day backfill"
+                    )
+                    since = datetime.now(timezone.utc) - timedelta(days=7)
+                else:
+                    # Normal incremental sync
+                    since = source.lastSyncAt - timedelta(minutes=5)  # 5 min overlap for safety
             else:
-                since = datetime.now(timezone.utc) - timedelta(hours=24)
+                # First sync - fetch last 7 days of historical data
+                logger.info(f"[{profile.displayName}] First sync - fetching 7 days of historical data")
+                since = datetime.now(timezone.utc) - timedelta(days=7)
 
             glucose_count = 0
             treatment_count = 0
 
             # Sync glucose if this source provides it
             if source.providesGlucose:
-                readings = await gluroo.fetch_glucose_readings(since=since)
+                # Use account ID for Gluroo fetch (data is stored under account, not profile)
+                readings = await gluroo.fetch_glucose_entries(
+                    user_id=profile.accountId,
+                    since=since
+                )
                 if readings:
-                    # Convert to GlucoseReading with profile's user context
-                    # Note: We use profile.id as the userId for data partitioning
+                    # Store under account ID (NOT profile ID) for data access
+                    # Data is partitioned by account, profiles just control access
                     for reading in readings:
-                        reading.userId = profile.id
+                        reading.userId = profile.accountId
 
                     glucose_count = await self.glucose_repo.create_many(readings)
 
             # Sync treatments if this source provides it
             if source.providesTreatments:
-                treatments = await gluroo.fetch_treatments(since=since)
+                treatments = await gluroo.fetch_all_treatments(
+                    user_id=profile.accountId,
+                    since=since
+                )
                 if treatments:
-                    # Convert to Treatment with profile's user context
+                    # Store under account ID (NOT profile ID) for data access
                     for treatment in treatments:
-                        treatment.userId = profile.id
+                        treatment.userId = profile.accountId
+
+                    # Enrich carb treatments with AI-estimated GI, macros, absorption rate
+                    if ENRICHMENT_AVAILABLE:
+                        for treatment in treatments:
+                            if (treatment.type == 'carbs' and treatment.carbs
+                                    and treatment.notes and treatment.notes.strip()
+                                    and not treatment.glycemicIndex):
+                                try:
+                                    await food_enrichment_service.initialize()
+
+                                    # Estimate protein/fat if missing
+                                    if not treatment.protein or not treatment.fat:
+                                        macro_est = await food_enrichment_service.estimate_macros_from_description(
+                                            food_description=treatment.notes,
+                                            known_carbs=treatment.carbs
+                                        )
+                                        if not treatment.protein:
+                                            treatment.protein = macro_est.protein_g
+                                        if not treatment.fat:
+                                            treatment.fat = macro_est.fat_g
+
+                                    # Get glycemic features
+                                    features = await food_enrichment_service.extract_food_features(
+                                        food_text=treatment.notes,
+                                        carbs=treatment.carbs,
+                                        protein=treatment.protein or 0,
+                                        fat=treatment.fat or 0
+                                    )
+                                    treatment.glycemicIndex = features.glycemic_index
+                                    treatment.glycemicLoad = features.glycemic_load
+                                    treatment.absorptionRate = features.absorption_rate
+                                    treatment.fatContent = features.fat_content
+                                    treatment.isLiquid = features.is_liquid
+                                    treatment.enrichedAt = datetime.now(timezone.utc)
+                                    logger.info(
+                                        f"Enriched '{treatment.notes[:40]}': "
+                                        f"GI={features.glycemic_index}, {features.absorption_rate}"
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"Enrichment failed for '{treatment.notes[:30]}': {e}")
+                                    treatment.glycemicIndex = 55
+                                    treatment.absorptionRate = 'medium'
 
                     treatment_count = await self.treatment_repo.create_many(treatments)
 
@@ -319,10 +430,12 @@ class DataSourceManager:
             # Dexcom only provides glucose
             glucose_count = 0
             if source.providesGlucose:
-                readings = await dexcom.fetch_glucose_readings()
+                readings = await dexcom.fetch_glucose_entries()
                 if readings:
+                    # Store under account ID (NOT profile ID) for data access
+                    # Data is partitioned by account, profiles just control access
                     for reading in readings:
-                        reading.userId = profile.id
+                        reading.userId = profile.accountId
                     glucose_count = await self.glucose_repo.create_many(readings)
 
             # Update sync status
@@ -368,6 +481,77 @@ class DataSourceManager:
         # Nightscout sync is essentially the same as Gluroo
         # since Gluroo is Nightscout-compatible
         return await self._sync_gluroo(source, profile)
+
+    async def _sync_tandem(
+        self,
+        source: ProfileDataSource,
+        profile: ManagedProfile
+    ) -> SyncResult:
+        """
+        Sync data from Tandem Source (pump data).
+
+        Fetches basal/bolus events via tconnectsync, transforms them,
+        and upserts treatments into CosmosDB.
+        """
+        credentials = self._get_tandem_credentials(source)
+        if not credentials:
+            await self.source_repo.update_sync_status(
+                source.id,
+                source.profileId,
+                SyncStatus.ERROR.value,
+                "Failed to decrypt Tandem credentials"
+            )
+            return SyncResult(
+                success=False,
+                source_id=source.id,
+                source_type="tandem",
+                error_message="Failed to decrypt Tandem credentials"
+            )
+
+        try:
+            from services.tandem_sync_service import TandemSyncService
+
+            since = source.lastSyncAt - timedelta(minutes=5) if source.lastSyncAt else \
+                datetime.now(timezone.utc) - timedelta(days=7)
+
+            tandem_service = TandemSyncService()
+            result = await tandem_service.sync_for_source(
+                email=credentials.email,
+                password=credentials.password,
+                user_id=profile.accountId,
+                since=since,
+            )
+
+            treatment_count = result.get("total", 0)
+
+            await self.source_repo.update_sync_status(
+                source.id,
+                source.profileId,
+                SyncStatus.OK.value
+            )
+
+            return SyncResult(
+                success=True,
+                source_id=source.id,
+                source_type="tandem",
+                glucose_count=0,
+                treatment_count=treatment_count
+            )
+
+        except Exception as e:
+            logger.error(f"Tandem sync failed for {source.id}: {e}")
+            await self.source_repo.update_sync_status(
+                source.id,
+                source.profileId,
+                SyncStatus.ERROR.value,
+                str(e)
+            )
+            return SyncResult(
+                success=False,
+                source_id=source.id,
+                source_type="tandem",
+                error_message=str(e)
+            )
 
     async def sync_all_profiles(self) -> Dict[str, List[SyncResult]]:
         """
@@ -420,9 +604,9 @@ class DataSourceManager:
         """
         end_time = end_time or datetime.now(timezone.utc)
 
-        # Get readings using profile.id as the userId
+        # Get readings using accountId (data is stored under account, not profile)
         readings = await self.glucose_repo.get_history(
-            user_id=profile.id,
+            user_id=profile.accountId,
             start_time=start_time,
             end_time=end_time,
             limit=limit
@@ -446,9 +630,9 @@ class DataSourceManager:
         """
         end_time = end_time or datetime.now(timezone.utc)
 
-        # Get treatments using profile.id as the userId
+        # Get treatments using accountId (data is stored under account, not profile)
         treatments = await self.treatment_repo.get_by_user(
-            user_id=profile.id,
+            user_id=profile.accountId,
             start_time=start_time,
             end_time=end_time,
             limit=limit
@@ -498,9 +682,15 @@ class DataSourceManager:
         Deduplicate treatments within a time window.
 
         Only considers treatments of the same type as duplicates.
+        When both Tandem and Gluroo report insulin at similar timestamps,
+        prefers Tandem (pump is ground truth).
+        For carbs, prefers whichever has richer data (notes, protein, fat).
         """
         if not treatments:
             return []
+
+        # Source priority: tandem > gluroo > manual (lower = higher priority)
+        source_priority = {"tandem": 0, "gluroo": 1, "manual": 2}
 
         # Sort by timestamp
         sorted_treatments = sorted(treatments, key=lambda t: t.timestamp)
@@ -509,19 +699,63 @@ class DataSourceManager:
         deduplicated = []
         for treatment in sorted_treatments:
             # Check if we already have a similar treatment within the window
-            is_duplicate = False
-            for existing in deduplicated:
-                if existing.type != treatment.type:
+            duplicate_idx = None
+            # Normalize type for comparison: insulin-like types are fungible
+            treatment_type_key = _insulin_type_key(treatment.type)
+
+            for i, existing in enumerate(deduplicated):
+                existing_type_key = _insulin_type_key(existing.type)
+                if existing_type_key != treatment_type_key:
                     continue
                 time_diff = abs((treatment.timestamp - existing.timestamp).total_seconds())
                 if time_diff < window_minutes * 60:
-                    is_duplicate = True
+                    duplicate_idx = i
                     break
 
-            if not is_duplicate:
+            if duplicate_idx is not None:
+                existing = deduplicated[duplicate_idx]
+                # Prefer higher-priority source
+                existing_priority = source_priority.get(getattr(existing, 'source', 'manual'), 2)
+                new_priority = source_priority.get(getattr(treatment, 'source', 'manual'), 2)
+
+                if new_priority < existing_priority:
+                    deduplicated[duplicate_idx] = treatment
+                elif new_priority == existing_priority and treatment_type_key == "carbs":
+                    # Same source, prefer richer carb data
+                    if _carb_richness(treatment) > _carb_richness(existing):
+                        deduplicated[duplicate_idx] = treatment
+            else:
                 deduplicated.append(treatment)
 
         return deduplicated
+
+
+def _insulin_type_key(treatment_type) -> str:
+    """Normalize treatment types for dedup comparison.
+
+    All insulin-like types (insulin, auto_correction, Correction Bolus, basal)
+    are compared within their own groups.
+    """
+    t = treatment_type.value if hasattr(treatment_type, 'value') else str(treatment_type)
+    if t in ("insulin", "auto_correction", "Correction Bolus"):
+        return "insulin"
+    if t == "basal":
+        return "basal"
+    return t
+
+
+def _carb_richness(treatment: Treatment) -> int:
+    """Score how rich a carb treatment's data is (for preferring richer entries)."""
+    score = 0
+    if getattr(treatment, 'notes', None):
+        score += len(treatment.notes)
+    if getattr(treatment, 'protein', None):
+        score += 10
+    if getattr(treatment, 'fat', None):
+        score += 10
+    if getattr(treatment, 'glycemicIndex', None):
+        score += 5
+    return score
 
 
 # Singleton instance

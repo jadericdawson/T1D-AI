@@ -526,41 +526,110 @@ class IOBCOBService:
         onset_min = self.insulin_onset_min
         ramp_min = self.insulin_ramp_min
 
-        # Filter to insulin treatments only
+        # Filter to insulin treatments only (includes basal and auto_correction)
         insulin_treatments = [t for t in treatments if t.insulin and t.insulin > 0]
 
         for treatment in insulin_treatments:
-            # Calculate time elapsed since bolus (with proper timezone handling)
-            time_elapsed = _minutes_since(treatment.timestamp, at_time)
+            # Basal treatments need special handling: split aggregated window
+            # back into sub-doses to model continuous delivery correctly
+            treatment_type = getattr(treatment, 'type', None)
+            if isinstance(treatment_type, str):
+                is_basal = treatment_type == "basal"
+            else:
+                is_basal = hasattr(treatment_type, 'value') and treatment_type.value == "basal"
 
-            # Only count if within duration and after the bolus
-            if 0 <= time_elapsed <= self.insulin_duration_min:
-                # IOB with ABSORPTION DELAY - shows realistic pharmacokinetics:
-                # 1. Onset phase (0-15min): Insulin not yet working, IOB stays high
-                # 2. Ramp phase (15-90min): Insulin becoming active, IOB decays moderately
-                # 3. Decay phase (90+min): Full decay as insulin is used up
-                #
-                # This creates a "shoulder" at the start before the decay kicks in
-
-                if time_elapsed < onset_min:
-                    # Pre-onset: Very slow decay (insulin not yet active)
-                    # Only ~5% absorbed during onset
-                    decay_factor = 1.0 - (0.05 * time_elapsed / onset_min)
-                elif time_elapsed < (onset_min + ramp_min):
-                    # Ramp-up phase: Moderate decay as insulin becomes active
-                    ramp_progress = (time_elapsed - onset_min) / ramp_min
-                    # Decay from 95% to 50% during ramp
-                    decay_factor = 0.95 - (0.45 * ramp_progress)
-                else:
-                    # Full decay phase: Exponential decay of remaining 50%
-                    decay_time = time_elapsed - onset_min - ramp_min
-                    remaining_at_ramp_end = 0.5
-                    decay_factor = remaining_at_ramp_end * (0.5 ** (decay_time / self.insulin_half_life_min))
-
-                iob_contribution = treatment.insulin * decay_factor
-                total_iob += iob_contribution
+            if is_basal:
+                total_iob += self._calculate_basal_iob(treatment, at_time, onset_min, ramp_min)
+            else:
+                total_iob += self._calculate_bolus_iob(treatment, at_time, onset_min, ramp_min)
 
         return round(total_iob, 2)
+
+    def _calculate_bolus_iob(
+        self,
+        treatment,
+        at_time: datetime,
+        onset_min: float,
+        ramp_min: float
+    ) -> float:
+        """Calculate IOB for a single bolus treatment using 3-phase pharmacokinetic model."""
+        time_elapsed = _minutes_since(treatment.timestamp, at_time)
+
+        if not (0 <= time_elapsed <= self.insulin_duration_min):
+            return 0.0
+
+        # IOB with ABSORPTION DELAY - shows realistic pharmacokinetics:
+        # 1. Onset phase (0-15min): Insulin not yet working, IOB stays high
+        # 2. Ramp phase (15-90min): Insulin becoming active, IOB decays moderately
+        # 3. Decay phase (90+min): Full decay as insulin is used up
+        #
+        # This creates a "shoulder" at the start before the decay kicks in
+
+        if time_elapsed < onset_min:
+            # Pre-onset: Very slow decay (insulin not yet active)
+            # Only ~5% absorbed during onset
+            decay_factor = 1.0 - (0.05 * time_elapsed / onset_min)
+        elif time_elapsed < (onset_min + ramp_min):
+            # Ramp-up phase: Moderate decay as insulin becomes active
+            ramp_progress = (time_elapsed - onset_min) / ramp_min
+            # Decay from 95% to 50% during ramp
+            decay_factor = 0.95 - (0.45 * ramp_progress)
+        else:
+            # Full decay phase: Exponential decay of remaining 50%
+            decay_time = time_elapsed - onset_min - ramp_min
+            remaining_at_ramp_end = 0.5
+            decay_factor = remaining_at_ramp_end * (0.5 ** (decay_time / self.insulin_half_life_min))
+
+        return treatment.insulin * decay_factor
+
+    def _calculate_basal_iob(
+        self,
+        treatment,
+        at_time: datetime,
+        onset_min: float,
+        ramp_min: float
+    ) -> float:
+        """
+        Calculate IOB for an aggregated basal treatment.
+
+        Splits the aggregated window back into 12 sub-doses (one per 5 min)
+        and applies the pharmacokinetic model to each individually. This
+        correctly models that the first micro-dose in the window is further
+        along absorption than the last.
+        """
+        duration_min = getattr(treatment, 'durationMinutes', None) or 60
+        sub_dose_interval = 5  # minutes
+        num_sub_doses = max(1, duration_min // sub_dose_interval)
+        sub_dose_amount = treatment.insulin / num_sub_doses
+
+        total_basal_iob = 0.0
+        base_time = treatment.timestamp
+        if isinstance(base_time, str):
+            from datetime import datetime as dt
+            base_time = dt.fromisoformat(base_time.replace('Z', '+00:00'))
+
+        for i in range(num_sub_doses):
+            # Each sub-dose was delivered at base_time + i*5 minutes
+            from datetime import timedelta
+            sub_dose_time = base_time + timedelta(minutes=i * sub_dose_interval)
+            time_elapsed = _minutes_since(sub_dose_time, at_time)
+
+            if not (0 <= time_elapsed <= self.insulin_duration_min):
+                continue
+
+            if time_elapsed < onset_min:
+                decay_factor = 1.0 - (0.05 * time_elapsed / onset_min)
+            elif time_elapsed < (onset_min + ramp_min):
+                ramp_progress = (time_elapsed - onset_min) / ramp_min
+                decay_factor = 0.95 - (0.45 * ramp_progress)
+            else:
+                decay_time = time_elapsed - onset_min - ramp_min
+                remaining_at_ramp_end = 0.5
+                decay_factor = remaining_at_ramp_end * (0.5 ** (decay_time / self.insulin_half_life_min))
+
+            total_basal_iob += sub_dose_amount * decay_factor
+
+        return total_basal_iob
 
     def calculate_cob(
         self,

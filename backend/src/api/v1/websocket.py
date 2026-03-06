@@ -421,13 +421,15 @@ async def glucose_stream(
         await manager.send_personal_message(initial_data, websocket)
 
         last_reading_id = None
+        # Normalize profile ID to data user ID for database queries
+        data_user_id = get_data_user_id(user_id)
 
         while True:
             # Check for new readings every 5 seconds
             await asyncio.sleep(5)
 
             try:
-                latest = await glucose_repo.get_latest(user_id)
+                latest = await glucose_repo.get_latest(data_user_id)
                 if latest and latest.id != last_reading_id:
                     # New reading available
                     update = await get_glucose_update(user_id)

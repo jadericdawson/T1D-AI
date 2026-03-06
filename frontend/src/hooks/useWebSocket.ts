@@ -251,9 +251,7 @@ export function useGlucoseWebSocket({
                 },
                 metrics: {
                   ...oldData.metrics,
-                  iob: data.data!.metrics.iob,
-                  cob: data.data!.metrics.cob,
-                  isf: data.data!.metrics.isf,
+                  ...data.data!.metrics,
                 },
               }
             }

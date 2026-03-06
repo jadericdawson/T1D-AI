@@ -1,6 +1,6 @@
 """
 Data Sources API Endpoints for T1D-AI
-Manages connections to external data sources (Gluroo).
+Manages connections to external data sources (Gluroo, Tandem).
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -371,3 +371,219 @@ async def get_gluroo_defaults(current_user: User = Depends(get_current_user)):
             "syncInterval": 5,
             "isOwner": False
         }
+
+
+# ==================== Tandem Endpoints ====================
+
+
+class ConnectTandemRequest(BaseModel):
+    """Request to connect Tandem account."""
+    email: str
+    password: str
+
+
+@router.post("/tandem/test", response_model=TestConnectionResponse)
+async def test_tandem_connection(request: ConnectTandemRequest):
+    """
+    Test connection to Tandem API.
+
+    Validates credentials and confirms pump device is found.
+    """
+    try:
+        from services.tandem_sync_service import TandemSyncService
+        service = TandemSyncService()
+        success, message = await service.test_connection(request.email, request.password)
+        return TestConnectionResponse(success=success, message=message)
+    except Exception as e:
+        logger.error(f"Error testing Tandem connection: {e}")
+        return TestConnectionResponse(success=False, message=str(e))
+
+
+@router.post("/tandem/connect")
+async def connect_tandem(
+    request: ConnectTandemRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Connect Tandem account.
+
+    Tests credentials, encrypts password, and creates a ProfileDataSource.
+    """
+    from services.tandem_sync_service import TandemSyncService
+    from database.repositories import ProfileDataSourceRepository
+    from models.schemas import DataSourceType
+    import json
+
+    user_id = get_data_user_id(current_user.id)
+    profile_id = current_user.id  # Full profile ID (with prefix) for data source lookup
+
+    # Test connection first
+    service = TandemSyncService()
+    success, message = await service.test_connection(request.email, request.password)
+    if not success:
+        raise HTTPException(status_code=400, detail=f"Connection failed: {message}")
+
+    # Encrypt password
+    try:
+        encrypted_password = encrypt_secret(request.password)
+    except Exception as e:
+        logger.error(f"Encryption error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to secure credentials")
+
+    # Store credentials as JSON with encrypted password
+    credentials_json = json.dumps({
+        "email": request.email,
+        "password": encrypted_password,
+    })
+
+    # Create ProfileDataSource — use full profile ID to match get_by_profile queries
+    source_repo = ProfileDataSourceRepository()
+    source_id = f"{profile_id}_tandem"
+
+    source_data = {
+        "id": source_id,
+        "profileId": profile_id,
+        "sourceType": DataSourceType.TANDEM.value,
+        "credentialsEncrypted": credentials_json,
+        "isActive": True,
+        "syncEnabled": True,
+        "priority": 2,
+        "providesGlucose": False,
+        "providesTreatments": True,
+        "lastSyncAt": None,
+        "lastSyncStatus": "pending",
+        "userId": user_id,
+    }
+
+    try:
+        source_repo.container.upsert_item(body=source_data)
+        logger.info(f"Connected Tandem for user {user_id}")
+        return {"message": "Tandem connected successfully", "sourceId": source_id}
+    except Exception as e:
+        logger.error(f"Error saving Tandem source: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save credentials")
+
+
+@router.delete("/tandem")
+async def disconnect_tandem(current_user: User = Depends(get_current_user)):
+    """
+    Disconnect Tandem account.
+
+    Removes stored credentials but does not delete synced data.
+    """
+    from database.repositories import ProfileDataSourceRepository
+
+    profile_id = current_user.id
+    source_id = f"{profile_id}_tandem"
+
+    try:
+        source_repo = ProfileDataSourceRepository()
+        source_repo.container.delete_item(item=source_id, partition_key=profile_id)
+        logger.info(f"Disconnected Tandem for {profile_id}")
+        return {"message": "Tandem disconnected successfully"}
+    except Exception as e:
+        logger.error(f"Error disconnecting Tandem: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/tandem/status")
+async def get_tandem_status(current_user: User = Depends(get_current_user)):
+    """Get Tandem connection status."""
+    from database.repositories import ProfileDataSourceRepository
+
+    profile_id = current_user.id
+    source_id = f"{profile_id}_tandem"
+
+    try:
+        source_repo = ProfileDataSourceRepository()
+        try:
+            item = source_repo.container.read_item(item=source_id, partition_key=profile_id)
+            return {
+                "connected": True,
+                "lastSyncAt": item.get("lastSyncAt"),
+                "syncEnabled": item.get("syncEnabled", True),
+                "lastSyncStatus": item.get("lastSyncStatus", "pending"),
+            }
+        except Exception:
+            return {
+                "connected": False,
+                "lastSyncAt": None,
+                "syncEnabled": False,
+                "lastSyncStatus": None,
+            }
+    except Exception as e:
+        logger.error(f"Error getting Tandem status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/tandem/sync")
+async def sync_tandem(
+    full_sync: bool = Query(default=False, description="Perform full sync (7 days) instead of incremental"),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Manually trigger a Tandem sync.
+    """
+    from services.tandem_sync_service import TandemSyncService
+    from database.repositories import ProfileDataSourceRepository
+    from utils.encryption import decrypt_secret as decrypt_value
+    import json
+
+    user_id = get_data_user_id(current_user.id)
+    profile_id = current_user.id
+    source_id = f"{profile_id}_tandem"
+
+    # Get stored credentials
+    source_repo = ProfileDataSourceRepository()
+    try:
+        item = source_repo.container.read_item(item=source_id, partition_key=profile_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Tandem not connected")
+
+    creds = json.loads(item.get("credentialsEncrypted", "{}"))
+    email = creds.get("email", "")
+    encrypted_password = creds.get("password", "")
+
+    if not email or not encrypted_password:
+        raise HTTPException(status_code=400, detail="Invalid stored credentials")
+
+    try:
+        password = decrypt_value(encrypted_password)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot decrypt stored credentials. Please reconnect Tandem."
+        )
+
+    # Determine sync window
+    if full_sync or not item.get("lastSyncAt"):
+        since = datetime.now(timezone.utc) - timedelta(days=7)
+    else:
+        since = datetime.fromisoformat(
+            item["lastSyncAt"].replace("Z", "+00:00")
+        ) - timedelta(hours=1)
+
+    service = TandemSyncService()
+    try:
+        result = await service.sync_for_source(
+            email=email,
+            password=password,
+            user_id=user_id,
+            since=since,
+        )
+
+        # Update last sync timestamp
+        item["lastSyncAt"] = datetime.now(timezone.utc).isoformat()
+        item["lastSyncStatus"] = "ok"
+        source_repo.container.upsert_item(body=item)
+
+        return {
+            "basal": result["basal"],
+            "bolus": result["bolus"],
+            "carbs": result["carbs"],
+            "total": result["total"],
+            "lastSyncAt": item["lastSyncAt"],
+        }
+    except Exception as e:
+        logger.error(f"Tandem sync failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")

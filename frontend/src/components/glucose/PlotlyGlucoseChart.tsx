@@ -1163,7 +1163,7 @@ export function PlotlyGlucoseChart({
           config={config}
           style={{ width: '100%', height: '100%' }}
           useResizeHandler={true}
-          revision={traces.length}
+          revision={readings.length + (readings[readings.length - 1] ? new Date(readings[readings.length - 1].timestamp).getTime() : 0)}
         />
       </ChartErrorBoundary>
     </div>

@@ -436,6 +436,37 @@ class TreatmentRepository(BaseRepository):
         """Create or update a treatment."""
         return await self.create(treatment)
 
+    async def upsert_dict(self, data: dict) -> dict:
+        """Upsert a treatment from a raw dict (used by Tandem sync)."""
+        return self.container.upsert_item(body=data)
+
+    async def find_duplicate_insulin(
+        self, user_id: str, timestamp_iso: str, insulin: float, tolerance_minutes: int = 2
+    ) -> bool:
+        """Check if a similar insulin treatment already exists (for dedup across sources)."""
+        from datetime import datetime, timedelta, timezone as tz
+        ts = datetime.fromisoformat(timestamp_iso.replace("Z", "+00:00"))
+        start = (ts - timedelta(minutes=tolerance_minutes)).isoformat()
+        end = (ts + timedelta(minutes=tolerance_minutes)).isoformat()
+        query = """
+            SELECT c.id FROM c
+            WHERE c.userId = @userId
+              AND c.timestamp >= @start AND c.timestamp <= @end
+              AND c.insulin >= @insulinLow AND c.insulin <= @insulinHigh
+            OFFSET 0 LIMIT 1
+        """
+        params = [
+            {"name": "@userId", "value": user_id},
+            {"name": "@start", "value": start},
+            {"name": "@end", "value": end},
+            {"name": "@insulinLow", "value": insulin - 0.01},
+            {"name": "@insulinHigh", "value": insulin + 0.01},
+        ]
+        results = list(self.container.query_items(
+            query=query, parameters=params, partition_key=user_id
+        ))
+        return len(results) > 0
+
     async def create_many(self, treatments: List[Treatment]) -> int:
         """Bulk create treatments."""
         count = 0
@@ -491,10 +522,30 @@ class TreatmentRepository(BaseRepository):
         ))
         return [Treatment(**item) for item in items]
 
-    async def get_for_iob_calculation(self, user_id: str, duration_minutes: int = 180) -> List[Treatment]:
-        """Get insulin treatments for IOB calculation."""
+    async def get_for_iob_calculation(self, user_id: str, duration_minutes: int = 300) -> List[Treatment]:
+        """Get insulin treatments for IOB calculation.
+
+        Includes insulin, basal, auto_correction, and Correction Bolus types.
+        Extended to 300 min (5 hr) for basal tail from continuous delivery.
+        """
         start_time = datetime.now(timezone.utc) - timedelta(minutes=duration_minutes)
-        return await self.get_recent(user_id, hours=duration_minutes // 60 + 1, treatment_type="insulin")
+        query = """
+            SELECT *
+            FROM c
+            WHERE c.userId = @userId
+              AND c.timestamp >= @startTime
+              AND c.type IN ('insulin', 'basal', 'auto_correction', 'Correction Bolus')
+            ORDER BY c.timestamp DESC
+        """
+        items = list(self.container.query_items(
+            query=query,
+            parameters=[
+                {"name": "@userId", "value": user_id},
+                {"name": "@startTime", "value": start_time.isoformat()},
+            ],
+            partition_key=user_id,
+        ))
+        return [Treatment(**item) for item in items]
 
     async def get_for_cob_calculation(self, user_id: str, duration_minutes: int = 180) -> List[Treatment]:
         """Get carb treatments for COB calculation."""
