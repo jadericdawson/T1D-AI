@@ -177,16 +177,19 @@ class GlurooService:
         Returns:
             Combined list of Treatment objects sorted by timestamp
         """
-        # Fetch both treatment types
+        # Fetch all treatment types (including Meal Bolus for tandem-sync entries)
         insulin = await self.fetch_treatments(
             user_id, count, since, event_type="Correction Bolus"
         )
         carbs = await self.fetch_treatments(
             user_id, count, since, event_type="Carb Correction"
         )
+        meals = await self.fetch_treatments(
+            user_id, count, since, event_type="Meal Bolus"
+        )
 
         # Combine and sort by timestamp
-        all_treatments = insulin + carbs
+        all_treatments = insulin + carbs + meals
         all_treatments.sort(key=lambda t: t.timestamp, reverse=True)
 
         return all_treatments

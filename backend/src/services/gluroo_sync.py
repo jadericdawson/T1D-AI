@@ -169,7 +169,7 @@ class GlurooSyncService:
     async def fetch_treatments(self, since_ms: int) -> list:
         """Fetch treatments from Gluroo API."""
         all_treatments = []
-        for event_type in ["Correction Bolus", "Carb Correction"]:
+        for event_type in ["Correction Bolus", "Carb Correction", "Meal Bolus"]:
             url = (f"{GLUROO_URL}/api/v1/treatments.json?count={FETCH_COUNT}"
                    f"&find[eventType]={event_type.replace(' ', '%20')}"
                    f"&find[mills][$gt]={since_ms}")
