@@ -327,10 +327,10 @@ export default function Settings() {
     }
   }
 
-  const handleSyncTandem = async () => {
+  const handleSyncTandem = async (fullSync: boolean = false) => {
     setTandemStatus('syncing')
     try {
-      await datasourcesApi.syncTandem()
+      await datasourcesApi.syncTandem(fullSync)
       setTandemStatus('success')
       queryClient.invalidateQueries({ queryKey: ['glucose'] })
       queryClient.invalidateQueries({ queryKey: ['treatments'] })
@@ -708,12 +708,20 @@ export default function Settings() {
                         <>
                           <Button
                             variant="outline"
-                            onClick={handleSyncTandem}
+                            onClick={() => handleSyncTandem(false)}
                             disabled={tandemStatus === 'syncing'}
                           >
                             {tandemStatus === 'syncing' && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
                             <RefreshCw className="w-4 h-4 mr-2" />
                             Sync Now
+                          </Button>
+                          <Button
+                            variant="outline"
+                            onClick={() => handleSyncTandem(true)}
+                            disabled={tandemStatus === 'syncing'}
+                          >
+                            {tandemStatus === 'syncing' && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                            Full Sync (7 days)
                           </Button>
                           <Button
                             variant="destructive"

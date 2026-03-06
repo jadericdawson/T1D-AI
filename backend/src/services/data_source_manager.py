@@ -511,9 +511,6 @@ class DataSourceManager:
         try:
             from services.tandem_sync_service import TandemSyncService
 
-            since = source.lastSyncAt - timedelta(minutes=5) if source.lastSyncAt else \
-                datetime.now(timezone.utc) - timedelta(days=7)
-
             # Look up Gluroo credentials for this profile so we can push bolus/carbs
             gluroo_url = None
             gluroo_api_secret = None
@@ -530,6 +527,13 @@ class DataSourceManager:
                             break
             except Exception as e:
                 logger.warning(f"Could not look up Gluroo credentials for Tandem push: {e}")
+
+            # First sync or reconnect: 7-day backfill; otherwise incremental
+            if not source.lastSyncAt:
+                since = datetime.now(timezone.utc) - timedelta(days=7)
+                logger.info(f"[{profile.displayName}] Tandem full backfill (7 days)")
+            else:
+                since = source.lastSyncAt - timedelta(minutes=5)
 
             tandem_service = TandemSyncService()
             result = await tandem_service.sync_for_source(

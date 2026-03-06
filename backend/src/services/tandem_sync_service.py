@@ -113,7 +113,8 @@ class TandemSyncService:
         gluroo_url: str,
         api_secret: str,
     ) -> int:
-        """Push bolus/carb treatments to Gluroo via Nightscout API."""
+        """Push bolus/carb treatments to Gluroo via Nightscout API, with dedup."""
+        base = gluroo_url.rstrip('/')
         secret_hash = hashlib.sha1(api_secret.encode()).hexdigest()
         headers = {
             "API-SECRET": secret_hash,
@@ -121,15 +122,42 @@ class TandemSyncService:
             "Accept": "application/json",
         }
 
+        # Fetch existing tandem-sync entries from Gluroo to avoid duplicates
+        existing_timestamps: set = set()
+        try:
+            with httpx.Client(timeout=15) as client:
+                resp = client.get(
+                    f"{base}/api/v1/treatments.json",
+                    params={
+                        "count": 500,
+                        "find[enteredBy]": "tandem-sync",
+                    },
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                for entry in resp.json():
+                    ts = entry.get("created_at", "")
+                    existing_timestamps.add(ts)
+            logger.info(f"Gluroo dedup: found {len(existing_timestamps)} existing tandem-sync entries")
+        except Exception as e:
+            logger.warning(f"Could not fetch existing Gluroo entries for dedup: {e}")
+
         pushed = 0
+        skipped = 0
         for treatment in treatments:
             ns_entry = self._to_nightscout_entry(treatment)
             if ns_entry is None:
                 continue
+
+            # Skip if this timestamp already exists in Gluroo
+            if ns_entry.get("created_at") in existing_timestamps:
+                skipped += 1
+                continue
+
             try:
                 with httpx.Client(timeout=10) as client:
                     resp = client.post(
-                        f"{gluroo_url.rstrip('/')}/api/v1/treatments",
+                        f"{base}/api/v1/treatments",
                         json=ns_entry,
                         headers=headers,
                     )
@@ -143,8 +171,8 @@ class TandemSyncService:
             except Exception as e:
                 logger.warning(f"Gluroo push error for {treatment.sourceId}: {e}")
 
-        if pushed > 0:
-            logger.info(f"Pushed {pushed}/{len(treatments)} treatments to Gluroo")
+        if pushed > 0 or skipped > 0:
+            logger.info(f"Gluroo push: {pushed} new, {skipped} already existed")
         return pushed
 
     @staticmethod
