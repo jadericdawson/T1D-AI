@@ -10,7 +10,6 @@ so all Tandem data must be written directly to CosmosDB.
 """
 import hashlib
 import logging
-from collections import defaultdict
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -116,8 +115,8 @@ class TandemSyncService:
     ) -> int:
         """Push bolus/carb treatments to Gluroo via Nightscout API, with dedup.
 
-        Combines paired insulin+carb treatments at the same timestamp into a
-        single "Meal Bolus" entry so Gluroo displays them together.
+        Uses separate entries per treatment (Correction Bolus + Carb Correction)
+        which is the proven format that displays correctly in the Gluroo app.
         """
         base = gluroo_url.rstrip('/')
         secret_hash = hashlib.sha1(api_secret.encode()).hexdigest()
@@ -127,44 +126,40 @@ class TandemSyncService:
             "Accept": "application/json",
         }
 
-        # Delete existing tandem-sync entries from Gluroo so we can push fresh
-        # combined entries (handles format migration from separate to combined)
-        deleted = 0
+        # Build set of existing timestamps in Gluroo to avoid pushing duplicates.
+        # Note: Gluroo overwrites enteredBy to "System", so we can't identify
+        # our entries — instead we dedup by matching timestamp + event type.
+        existing_keys: set = set()
         try:
             with httpx.Client(timeout=15) as client:
-                resp = client.get(
-                    f"{base}/api/v1/treatments.json",
-                    params={
-                        "count": 500,
-                        "find[enteredBy]": "tandem-sync",
-                    },
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                existing = resp.json()
-                if existing:
-                    logger.info(f"Gluroo cleanup: deleting {len(existing)} old tandem-sync entries")
-                    for entry in existing:
-                        entry_id = entry.get("_id")
-                        if entry_id:
-                            try:
-                                del_resp = client.delete(
-                                    f"{base}/api/v1/treatments/{entry_id}",
-                                    headers=headers,
-                                )
-                                del_resp.raise_for_status()
-                                deleted += 1
-                            except Exception:
-                                pass
-                    logger.info(f"Gluroo cleanup: deleted {deleted}/{len(existing)} old entries")
+                for event_type in ["Correction Bolus", "Carb Correction"]:
+                    resp = client.get(
+                        f"{base}/api/v1/treatments.json",
+                        params={
+                            "count": 500,
+                            "find[eventType]": event_type,
+                        },
+                        headers=headers,
+                    )
+                    resp.raise_for_status()
+                    for entry in resp.json():
+                        ts = entry.get("created_at", "")
+                        existing_keys.add((event_type, ts))
         except Exception as e:
-            logger.warning(f"Could not clean up old Gluroo entries: {e}")
+            logger.warning(f"Could not fetch existing Gluroo entries for dedup: {e}")
 
-        # Build combined Nightscout entries (merge insulin+carbs at same timestamp)
-        ns_entries = self._build_nightscout_entries(treatments)
-
+        # Push each treatment as a separate entry, skipping duplicates
         pushed = 0
-        for ns_entry in ns_entries:
+        skipped = 0
+        for treatment in treatments:
+            ns_entry = self._to_nightscout_entry(treatment)
+            if ns_entry is None:
+                continue
+
+            key = (ns_entry["eventType"], ns_entry["created_at"])
+            if key in existing_keys:
+                skipped += 1
+                continue
 
             try:
                 with httpx.Client(timeout=10) as client:
@@ -183,63 +178,43 @@ class TandemSyncService:
             except Exception as e:
                 logger.warning(f"Gluroo push error: {e}")
 
-        if pushed > 0:
-            logger.info(f"Gluroo push: {pushed} new entries (deleted {deleted} old)")
+        if pushed > 0 or skipped > 0:
+            logger.info(f"Gluroo push: {pushed} new, {skipped} skipped (already exist)")
         return pushed
 
-    @staticmethod
-    def _build_nightscout_entries(treatments: List[T1DAITreatment]) -> list:
-        """Build Nightscout entries, combining insulin+carbs at the same timestamp.
+    # Nightscout event type mapping (matches proven standalone gluroo_writer.py)
+    _EVENT_TYPE_MAP = {
+        "insulin": "Correction Bolus",
+        "auto_correction": "Correction Bolus",
+        "carbs": "Carb Correction",
+    }
 
-        When a bolus has associated carbs (from pump calculator), Gluroo expects
-        a single "Meal Bolus" entry with both insulin and carbs fields.
+    @classmethod
+    def _to_nightscout_entry(cls, treatment: T1DAITreatment) -> dict | None:
+        """Convert a single treatment to a Nightscout entry.
+
+        Uses separate entries per treatment (not combined Meal Bolus),
+        which is the proven format that displays correctly in Gluroo.
         """
-        # Group by timestamp
-        by_ts: dict = defaultdict(list)
-        for t in treatments:
-            by_ts[t.timestamp].append(t)
+        event_type = cls._EVENT_TYPE_MAP.get(treatment.type)
+        if event_type is None:
+            return None
 
-        entries = []
-        for ts, group in by_ts.items():
-            insulin_t = next((t for t in group if t.type in ("insulin", "auto_correction")), None)
-            carb_t = next((t for t in group if t.type == "carbs"), None)
+        entry = {
+            "eventType": event_type,
+            "created_at": treatment.timestamp,
+            "enteredBy": "tandem-sync",
+            "notes": treatment.notes or "",
+        }
 
-            if insulin_t and carb_t:
-                # Combined meal bolus — Gluroo shows these together
-                notes = insulin_t.notes or ""
-                if insulin_t.bolusType:
-                    notes = f"[{insulin_t.bolusType}] {notes}".strip()
-                entries.append({
-                    "eventType": "Meal Bolus",
-                    "created_at": ts,
-                    "enteredBy": "tandem-sync",
-                    "insulin": insulin_t.insulin,
-                    "carbs": carb_t.carbs,
-                    "notes": notes,
-                })
-            elif insulin_t:
-                # Correction or auto bolus (no carbs)
-                notes = insulin_t.notes or ""
-                if insulin_t.bolusType:
-                    notes = f"[{insulin_t.bolusType}] {notes}".strip()
-                entries.append({
-                    "eventType": "Correction Bolus",
-                    "created_at": ts,
-                    "enteredBy": "tandem-sync",
-                    "insulin": insulin_t.insulin,
-                    "notes": notes,
-                })
-            elif carb_t:
-                # Standalone carbs (rare from pump)
-                entries.append({
-                    "eventType": "Carb Correction",
-                    "created_at": ts,
-                    "enteredBy": "tandem-sync",
-                    "carbs": carb_t.carbs,
-                    "notes": carb_t.notes or "",
-                })
+        if treatment.type in ("insulin", "auto_correction"):
+            entry["insulin"] = treatment.insulin
+            if treatment.bolusType:
+                entry["notes"] = f"[{treatment.bolusType}] {entry['notes']}".strip()
+        elif treatment.type == "carbs":
+            entry["carbs"] = treatment.carbs
 
-        return entries
+        return entry
 
     async def test_connection(self, email: str, password: str) -> tuple[bool, str]:
         """Test Tandem API credentials."""

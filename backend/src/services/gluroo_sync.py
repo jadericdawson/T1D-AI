@@ -474,16 +474,19 @@ class GlurooSyncService:
 
         return doc
 
-    def _sync_tandem_notes(self, gluroo_entry: dict):
+    def _sync_tandem_notes(self, gluroo_entry: dict) -> bool:
         """
-        Sync user-added notes from a tandem-sync entry in Gluroo back to the
-        matching Tandem entry in CosmosDB. This lets users annotate pump boluses
-        in Gluroo and have those notes appear in T1D-AI.
+        Check if a Gluroo entry matches a Tandem entry in CosmosDB (by timestamp).
+        If found, sync any user-added notes and return True to skip creating a duplicate.
+
+        Gluroo overwrites enteredBy to "System" for API-pushed entries, so we
+        identify tandem entries by matching timestamp in CosmosDB.
+
+        Returns True if a matching Tandem entry was found (caller should skip).
         """
-        notes = gluroo_entry.get('notes', '') or gluroo_entry.get('foodType', '') or ''
         created_at = gluroo_entry.get('created_at', '')
-        if not notes.strip() or not created_at:
-            return
+        if not created_at:
+            return False
 
         try:
             query = """
@@ -499,13 +502,24 @@ class GlurooSyncService:
                 ],
                 partition_key=USER_ID,
             ))
-            for item in items:
-                if notes != item.get('notes', ''):
-                    item['notes'] = notes
-                    self.treatment_container.upsert_item(item)
-                    logger.info(f"Synced Gluroo notes to Tandem entry: '{notes[:50]}'")
+            if not items:
+                return False
+
+            # Matching tandem entry exists — sync notes if user added any
+            notes = gluroo_entry.get('notes', '') or gluroo_entry.get('foodType', '') or ''
+            notes = notes.strip()
+            # Skip auto-generated notes like "Bolus: X.XXu" or "Food: XXg"
+            if notes and not notes.startswith('Bolus:') and not notes.startswith('Food:'):
+                for item in items:
+                    if notes != (item.get('notes', '') or ''):
+                        item['notes'] = notes
+                        self.treatment_container.upsert_item(item)
+                        logger.info(f"Synced Gluroo notes to Tandem entry: '{notes[:50]}'")
+
+            return True
         except Exception as e:
-            logger.warning(f"Failed to sync tandem notes: {e}")
+            logger.warning(f"Failed to check tandem notes: {e}")
+            return False
 
     async def sync_once(self) -> tuple[int, int]:
         """Perform one sync cycle. Returns (glucose_count, treatment_count)."""
@@ -559,9 +573,11 @@ class GlurooSyncService:
 
         # Process treatments with GI enrichment and user edit preservation
         for entry in treatment_entries:
-            # tandem-sync entries: sync user-added notes back to Tandem entries in CosmosDB
-            if entry.get('enteredBy') == 'tandem-sync':
-                self._sync_tandem_notes(entry)
+            # Check if this Gluroo entry matches a Tandem entry in CosmosDB (by timestamp).
+            # If so, sync notes from Gluroo to the Tandem entry and skip creating a duplicate.
+            # Note: Gluroo overwrites enteredBy to "System", so we can't check enteredBy.
+            created_at = entry.get('created_at', '')
+            if created_at and self._sync_tandem_notes(entry):
                 mills = entry.get('mills', 0)
                 if mills > max_treatment_ms:
                     max_treatment_ms = mills
