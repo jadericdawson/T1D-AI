@@ -452,10 +452,12 @@ class GlurooService:
 
     def _parse_treatment_entry(self, entry: dict, user_id: str) -> Optional[Treatment]:
         """Parse a raw Gluroo treatment entry into a Treatment."""
-        # Skip treatments that originated from T1D-AI to prevent duplicates
+        # Skip treatments that originated from T1D-AI or tandem-sync to prevent duplicates
+        # tandem-sync entries are already in CosmosDB via TandemSyncService;
+        # note sync is handled separately by the legacy GlurooSyncService
         entered_by = entry.get('enteredBy', '')
-        if entered_by == 'T1D-AI':
-            logger.debug(f"Skipping T1D-AI originated treatment to prevent duplicate")
+        if entered_by in ('T1D-AI', 'tandem-sync'):
+            logger.debug(f"Skipping {entered_by} originated treatment to prevent duplicate")
             return None
 
         event_type = entry.get('eventType', '')

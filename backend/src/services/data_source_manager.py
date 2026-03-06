@@ -742,7 +742,18 @@ class DataSourceManager:
                 new_priority = source_priority.get(getattr(treatment, 'source', 'manual'), 2)
 
                 if new_priority < existing_priority:
+                    # New entry wins (higher priority) - merge notes from lower if richer
+                    existing_notes = getattr(existing, 'notes', '') or ''
+                    new_notes = getattr(treatment, 'notes', '') or ''
+                    if existing_notes and len(existing_notes) > len(new_notes):
+                        treatment.notes = existing_notes
                     deduplicated[duplicate_idx] = treatment
+                elif new_priority > existing_priority:
+                    # Existing wins (higher priority) - merge notes from new if richer
+                    existing_notes = getattr(existing, 'notes', '') or ''
+                    new_notes = getattr(treatment, 'notes', '') or ''
+                    if new_notes and len(new_notes) > len(existing_notes):
+                        existing.notes = new_notes
                 elif new_priority == existing_priority and treatment_type_key == "carbs":
                     # Same source, prefer richer carb data
                     if _carb_richness(treatment) > _carb_richness(existing):
