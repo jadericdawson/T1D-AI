@@ -127,8 +127,9 @@ class TandemSyncService:
             "Accept": "application/json",
         }
 
-        # Fetch existing tandem-sync entries from Gluroo to avoid duplicates
-        existing_timestamps: set = set()
+        # Delete existing tandem-sync entries from Gluroo so we can push fresh
+        # combined entries (handles format migration from separate to combined)
+        deleted = 0
         try:
             with httpx.Client(timeout=15) as client:
                 resp = client.get(
@@ -140,23 +141,30 @@ class TandemSyncService:
                     headers=headers,
                 )
                 resp.raise_for_status()
-                for entry in resp.json():
-                    ts = entry.get("created_at", "")
-                    existing_timestamps.add(ts)
-            logger.info(f"Gluroo dedup: found {len(existing_timestamps)} existing tandem-sync entries")
+                existing = resp.json()
+                if existing:
+                    logger.info(f"Gluroo cleanup: deleting {len(existing)} old tandem-sync entries")
+                    for entry in existing:
+                        entry_id = entry.get("_id")
+                        if entry_id:
+                            try:
+                                del_resp = client.delete(
+                                    f"{base}/api/v1/treatments/{entry_id}",
+                                    headers=headers,
+                                )
+                                del_resp.raise_for_status()
+                                deleted += 1
+                            except Exception:
+                                pass
+                    logger.info(f"Gluroo cleanup: deleted {deleted}/{len(existing)} old entries")
         except Exception as e:
-            logger.warning(f"Could not fetch existing Gluroo entries for dedup: {e}")
+            logger.warning(f"Could not clean up old Gluroo entries: {e}")
 
         # Build combined Nightscout entries (merge insulin+carbs at same timestamp)
         ns_entries = self._build_nightscout_entries(treatments)
 
         pushed = 0
-        skipped = 0
         for ns_entry in ns_entries:
-            # Skip if this timestamp already exists in Gluroo
-            if ns_entry.get("created_at") in existing_timestamps:
-                skipped += 1
-                continue
 
             try:
                 with httpx.Client(timeout=10) as client:
@@ -175,8 +183,8 @@ class TandemSyncService:
             except Exception as e:
                 logger.warning(f"Gluroo push error: {e}")
 
-        if pushed > 0 or skipped > 0:
-            logger.info(f"Gluroo push: {pushed} new, {skipped} already existed")
+        if pushed > 0:
+            logger.info(f"Gluroo push: {pushed} new entries (deleted {deleted} old)")
         return pushed
 
     @staticmethod
