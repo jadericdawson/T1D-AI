@@ -555,13 +555,9 @@ async def sync_tandem(
             detail="Cannot decrypt stored credentials. Please reconnect Tandem."
         )
 
-    # Determine sync window
-    if full_sync or not item.get("lastSyncAt"):
-        since = datetime.now(timezone.utc) - timedelta(days=7)
-    else:
-        since = datetime.fromisoformat(
-            item["lastSyncAt"].replace("Z", "+00:00")
-        ) - timedelta(hours=1)
+    # Always 7-day lookback — Tandem API returns a fixed event block regardless
+    # of range, so broader lookback catches site changes and cartridge fills
+    since = datetime.now(timezone.utc) - timedelta(days=7)
 
     # Look up Gluroo credentials so Tandem sync can push bolus/carbs to Gluroo
     gluroo_url = None

@@ -71,6 +71,7 @@ import { CurrentGlucose } from '@/components/glucose/CurrentGlucose'
 const PlotlyGlucoseChart = lazy(() => import('@/components/glucose/PlotlyGlucoseChart').then(m => ({ default: m.PlotlyGlucoseChart })))
 import { ChartLegend } from '@/components/glucose/ChartLegend'
 import { PredictionsCard } from '@/components/glucose/Predictions'
+import { PumpStatusCard } from '@/components/glucose/PumpStatusCard'
 import { IOBCard, COBCard, POBCard, ISFGaugeCard, ICRGaugeCard, PIRGaugeCard, ProteinInsulinCard, WarningCard, RecommendationCard, FoodSuggestion } from '@/components/metrics/MetricCard'
 import MetabolicStatePanel from '@/components/metrics/MetabolicStatePanel'
 import { LogCarbsModal, LogInsulinModal } from '@/components/treatments/TreatmentModal'
@@ -92,6 +93,7 @@ import {
   useAIChat,
   useLearnedRatios,
   useGlurooSync,
+  usePumpStatus,
 } from '@/hooks/useGlucose'
 import { useGlucoseWebSocket, GlurooSyncEvent } from '@/hooks/useWebSocket'
 import { toast } from '@/hooks/useToast'
@@ -253,6 +255,7 @@ export default function Dashboard() {
   const { data: treatmentsData } = useRecentTreatments(24, userId)
   const { data: insightsData } = useInsights(5)
   const { data: accuracyData } = usePredictionAccuracy()
+  const { data: pumpStatus, isLoading: isLoadingPump } = usePumpStatus(userId)
 
   // Learned ratios (ISF, ICR, PIR) from training - pass userId for shared access
   const learnedRatios = useLearnedRatios(userId)
@@ -962,6 +965,14 @@ export default function Dashboard() {
                   totalComparisons: accuracy.totalComparisons
                 } : undefined}
                 modelAvailable={modelAvailable}
+              />
+            </div>
+
+            {/* Pump Status */}
+            <div className="mt-4 pt-4 border-t border-slate-700">
+              <PumpStatusCard
+                pumpStatus={pumpStatus ?? null}
+                isLoading={isLoadingPump}
               />
             </div>
           </div>

@@ -17,6 +17,7 @@ import {
   TreatmentCreate,
   TreatmentResponse,
   ChatResponse,
+  PumpStatus,
 } from '@/lib/api'
 
 // Query keys - user ID from JWT token, no longer needed in keys for most endpoints
@@ -33,6 +34,7 @@ export const queryKeys = {
   predictions: () => ['predictions'],
   insights: () => ['insights'],
   anomalies: (hours: number) => ['anomalies', hours],
+  pumpStatus: (userId: string) => ['glucose', 'pumpStatus', userId],
 }
 
 // ==================== Glucose Hooks ====================
@@ -109,6 +111,16 @@ export function useRangeStats(
     queryFn: () => glucoseApi.getRangeStats(userId, hours),
     enabled: !!userId, // Only fetch when userId is available
     staleTime: 300000, // 5 minutes
+  })
+}
+
+export function usePumpStatus(userId: string) {
+  return useQuery<PumpStatus | null>({
+    queryKey: queryKeys.pumpStatus(userId),
+    queryFn: () => glucoseApi.getPumpStatus(userId),
+    enabled: !!userId,
+    refetchInterval: 300000, // Every 5 min (matches Tandem sync cadence)
+    staleTime: 120000,
   })
 }
 

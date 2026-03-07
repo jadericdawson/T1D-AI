@@ -730,3 +730,26 @@ async def get_range_stats(
     except Exception as e:
         logger.error(f"Error getting range stats: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/pump-status")
+async def get_pump_status(
+    user_id: str = Query(..., description="User ID whose pump status to view"),
+    current_user=Depends(get_current_user),
+):
+    """Get pump status (battery, mode, alerts, site change, etc.) from Tandem sync."""
+    has_access = await validate_user_access(current_user.id, user_id)
+    if not has_access:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    data_user_id = get_data_user_id(user_id)
+
+    from database.repositories import PumpStatusRepository
+    pump_repo = PumpStatusRepository()
+    doc = await pump_repo.get(data_user_id)
+
+    if not doc:
+        return None
+
+    # Strip CosmosDB system fields
+    return {k: v for k, v in doc.items() if not k.startswith("_")}

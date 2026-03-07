@@ -14,6 +14,7 @@ import hashlib
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -98,7 +99,7 @@ class TandemSyncService:
 
         # Build and upsert pump_status document from expanded events
         try:
-            pump_status = self._build_pump_status(user_id, fetch_result)
+            pump_status = await self._build_pump_status(user_id, fetch_result)
             await self.pump_status_repo.upsert(pump_status)
             logger.info(f"Pump status upserted for {user_id}")
         except Exception as e:
@@ -132,15 +133,40 @@ class TandemSyncService:
             "gluroo": gluroo_bolus_count + gluroo_basal_count,
         }
 
-    def _build_pump_status(self, user_id: str, result) -> dict:
-        """Build a pump_status document from the most recent events of each type."""
-        now = datetime.now(timezone.utc).isoformat()
+    async def _build_pump_status(self, user_id: str, result) -> dict:
+        """Build a pump_status document by merging new events into the existing document.
 
-        status = {
-            "id": f"{user_id}_pump_status",
-            "userId": user_id,
-            "last_updated": now,
-        }
+        We merge rather than replace because site changes, cartridge fills, etc.
+        happen every 2-3 days but the sync window is only 24 hours. Without merging,
+        those fields would disappear between events.
+        """
+        now = datetime.now(timezone.utc)
+
+        # Load existing document to preserve fields not in this sync window
+        try:
+            existing = await self.pump_status_repo.get(user_id)
+        except Exception:
+            existing = None
+
+        status = dict(existing) if existing else {}
+        # Remove CosmosDB metadata so upsert works cleanly
+        for key in ("_rid", "_self", "_etag", "_attachments", "_ts"):
+            status.pop(key, None)
+
+        status["id"] = f"{user_id}_pump_status"
+        status["userId"] = user_id
+        status["last_updated"] = now.isoformat()
+
+        # Get user timezone for daily totals (midnight-to-midnight in local time)
+        user_tz = ZoneInfo("America/New_York")  # default
+        try:
+            from database.repositories import UserRepository
+            user_repo = UserRepository()
+            user = await user_repo.get_by_id(user_id)
+            if user and user.settings and user.settings.timezone:
+                user_tz = ZoneInfo(user.settings.timezone)
+        except Exception:
+            pass  # fall back to Eastern
 
         # Battery and daily totals from most recent daily basal event
         if result.daily_basal_events:
@@ -148,10 +174,20 @@ class TandemSyncService:
             status["battery_percent"] = latest.battery_percent
             status["battery_millivolts"] = latest.battery_millivolts
             status["daily_basal_units"] = latest.daily_basal_units
-            status["daily_bolus_units"] = latest.daily_bolus_units
-            status["daily_total_insulin"] = latest.daily_total_insulin
             status["pump_iob"] = latest.pump_iob
             status["battery_updated_at"] = latest.timestamp.isoformat()
+
+        # Daily bolus total from bolus events (today in user's local timezone)
+        today_local = now.astimezone(user_tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = today_local.astimezone(timezone.utc)
+        daily_bolus_u = sum(
+            b.insulin for b in result.bolus_events
+            if b.insulin and b.insulin > 0 and b.timestamp >= today_start
+        )
+        if daily_bolus_u > 0:
+            status["daily_bolus_units"] = round(daily_bolus_u, 2)
+            basal_u = status.get("daily_basal_units") or 0
+            status["daily_total_insulin"] = round(basal_u + daily_bolus_u, 2)
 
         # Current Control-IQ mode
         if result.mode_changes:
@@ -206,14 +242,40 @@ class TandemSyncService:
         if result.site_changes:
             latest = result.site_changes[-1]
             status["last_site_change_at"] = latest.timestamp.isoformat()
-            hours = (datetime.now(timezone.utc) - latest.timestamp).total_seconds() / 3600
-            status["site_age_hours"] = round(hours, 1)
+
+        # Always recompute site age from stored timestamp
+        if status.get("last_site_change_at"):
+            try:
+                site_ts = datetime.fromisoformat(status["last_site_change_at"])
+                hours = (now - site_ts).total_seconds() / 3600
+                status["site_age_hours"] = round(hours, 1)
+            except (ValueError, TypeError):
+                pass
 
         # Cartridge
         if result.cartridge_events:
             latest = result.cartridge_events[-1]
             status["last_cartridge_change_at"] = latest.timestamp.isoformat()
             status["last_cartridge_volume"] = latest.volume
+
+        # Compute insulin remaining: cartridge fill volume minus total delivered since fill
+        if status.get("last_cartridge_change_at") and status.get("last_cartridge_volume"):
+            try:
+                fill_ts = datetime.fromisoformat(status["last_cartridge_change_at"])
+                # Sum all insulin delivered since cartridge fill
+                delivered = 0.0
+                for b in result.basal_events:
+                    if b.timestamp >= fill_ts:
+                        delivered += b.delivered_units or 0
+                for b in result.bolus_events:
+                    if b.timestamp >= fill_ts and b.insulin:
+                        delivered += b.insulin
+                # Only update if we have delivery data
+                if delivered > 0:
+                    remaining = max(0, status["last_cartridge_volume"] - delivered)
+                    status["insulin_remaining"] = round(remaining, 1)
+            except (ValueError, TypeError):
+                pass
 
         # Tubing
         if result.tubing_events:
@@ -226,10 +288,10 @@ class TandemSyncService:
             status["daily_auto_corrections"] = latest.auto_corrections_today
             status["sensor_type"] = latest.sensor_type
 
-        # Daily carbs from bolus events
+        # Daily carbs from bolus events (today only)
         daily_carbs = sum(
             b.carbs for b in result.bolus_events
-            if b.carbs and b.carbs > 0
+            if b.carbs and b.carbs > 0 and b.timestamp >= today_start
         )
         if daily_carbs > 0:
             status["daily_carbs"] = round(daily_carbs, 1)

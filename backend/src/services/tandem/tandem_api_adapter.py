@@ -265,7 +265,16 @@ class TandemApiAdapter:
     # ===================== Expanded Extraction Methods =====================
 
     def _extract_daily_basal(self, raw_events: list) -> List[TandemDailyBasalEvent]:
-        """Extract daily basal summaries with battery and IOB (LidDailyBasal)."""
+        """Extract daily basal summaries with battery and IOB (LidDailyBasal).
+
+        Field sources (from tconnectsync events.py LidDailyBasal):
+        - dailytotalbasal: float in UNITS (not milliUnits)
+        - lastbasalrate: float in units/hour
+        - iob: float in UNITS
+        - batterychargepercentmsbRaw / batterychargepercentlsbRaw: raw ints
+        - batterylipomillivolts: int millivolts
+        - batteryChargePercent: computed property = (256*(msb-14)+lsb)/(3*256)
+        """
         events = []
         for e in raw_events:
             if type(e).__name__ != "LidDailyBasal":
@@ -276,33 +285,39 @@ class TandemApiAdapter:
                 if ts is None:
                     continue
 
-                # Battery: try direct properties first, then compute from MSB/LSB
+                # Battery: use computed property from event object, plus raw millivolts
                 battery_pct = None
-                battery_mv = None
-                msb = d.get("batteryLevelMsb") or d.get("batterylevelmsb")
-                lsb = d.get("batteryLevelLsb") or d.get("batterylevellsb")
-                if msb is not None and lsb is not None:
-                    try:
-                        raw_mv = 256 * int(msb) + int(lsb)
-                        battery_mv = raw_mv
-                        # Tandem Mobi: 3600mV = ~0%, 4200mV = ~100%
-                        battery_pct = max(0.0, min(100.0, (raw_mv - 3600) / 6.0))
-                    except (ValueError, TypeError):
-                        pass
+                raw_mv = d.get("batterylipomillivolts")
+                # Only trust millivolts if in reasonable LiPo range (3000-4500mV)
+                battery_mv = int(raw_mv) if raw_mv is not None and 3000 <= int(raw_mv) <= 4500 else None
+                try:
+                    battery_pct = float(e.batteryChargePercent) * 100  # property returns 0-1 range
+                except (AttributeError, TypeError, ValueError):
+                    # Fallback: compute from raw MSB/LSB in todict
+                    msb = d.get("batterychargepercentmsbRaw")
+                    lsb = d.get("batterychargepercentlsbRaw")
+                    if msb is not None and lsb is not None:
+                        try:
+                            battery_pct = (256 * (int(msb) - 14) + int(lsb)) / (3 * 256) * 100
+                        except (ValueError, TypeError):
+                            pass
 
-                # Daily totals (in milliUnits)
-                daily_basal_mu = d.get("dailyTotalBasal", d.get("dailytotalbasal", 0)) or 0
-                daily_bolus_mu = d.get("dailyTotalBolus", d.get("dailytotalbolus", 0)) or 0
-                pump_iob_mu = d.get("iob", 0) or 0
+                # Clamp battery percent to 0-100
+                if battery_pct is not None:
+                    battery_pct = max(0.0, min(100.0, battery_pct))
+
+                # Daily totals — already in UNITS (FLOAT32), not milliUnits
+                daily_basal_u = d.get("dailytotalbasal", 0) or 0
+                pump_iob_u = d.get("iob", 0) or 0
 
                 events.append(TandemDailyBasalEvent(
                     timestamp=ts,
                     battery_percent=round(battery_pct, 1) if battery_pct is not None else None,
-                    battery_millivolts=battery_mv,
-                    daily_basal_units=round(daily_basal_mu * MU_TO_U, 2) if daily_basal_mu else None,
-                    daily_bolus_units=round(daily_bolus_mu * MU_TO_U, 2) if daily_bolus_mu else None,
-                    daily_total_insulin=round((daily_basal_mu + daily_bolus_mu) * MU_TO_U, 2) if (daily_basal_mu or daily_bolus_mu) else None,
-                    pump_iob=round(pump_iob_mu * MU_TO_U, 2) if pump_iob_mu else None,
+                    battery_millivolts=int(battery_mv) if battery_mv is not None else None,
+                    daily_basal_units=round(daily_basal_u, 2) if daily_basal_u else None,
+                    daily_bolus_units=None,  # Not available in LidDailyBasal
+                    daily_total_insulin=None,  # Would need bolus data too
+                    pump_iob=round(pump_iob_u, 2) if pump_iob_u else None,
                     event_id=f"daily_basal_{d.get('seqNum', int(ts.timestamp()))}",
                 ))
             except Exception as ex:
@@ -446,10 +461,11 @@ class TandemApiAdapter:
                 ts = _parse_event_timestamp(d.get("eventTimestamp"))
                 if ts is None:
                     continue
-                volume_mu = d.get("insulinVolume", d.get("insulinvolume", 0)) or 0
+                # v2Volume is float in units; insulinvolume is int in units
+                volume = d.get("v2Volume") or d.get("insulinvolume", 0) or 0
                 events.append(TandemCartridgeEvent(
                     timestamp=ts,
-                    volume=round(volume_mu * MU_TO_U, 1) if volume_mu else None,
+                    volume=round(float(volume), 1) if volume else None,
                     event_id=f"cartridge_{d.get('seqNum', int(ts.timestamp()))}",
                 ))
             except Exception as ex:
@@ -468,10 +484,10 @@ class TandemApiAdapter:
                 ts = _parse_event_timestamp(d.get("eventTimestamp"))
                 if ts is None:
                     continue
-                prime_mu = d.get("primeSize", d.get("primesize", 0)) or 0
+                prime = d.get("primesize", 0) or 0  # FLOAT32 already in units
                 events.append(TandemSiteChangeEvent(
                     timestamp=ts,
-                    prime_volume=round(prime_mu * MU_TO_U, 3) if prime_mu else None,
+                    prime_volume=round(float(prime), 3) if prime else None,
                     event_id=f"site_{d.get('seqNum', int(ts.timestamp()))}",
                 ))
             except Exception as ex:
@@ -490,10 +506,10 @@ class TandemApiAdapter:
                 ts = _parse_event_timestamp(d.get("eventTimestamp"))
                 if ts is None:
                     continue
-                volume_mu = d.get("primeSize", d.get("primesize", 0)) or 0
+                volume = d.get("primesize", 0) or 0  # FLOAT32 already in units
                 events.append(TandemTubingEvent(
                     timestamp=ts,
-                    volume=round(volume_mu * MU_TO_U, 3) if volume_mu else None,
+                    volume=round(float(volume), 3) if volume else None,
                     event_id=f"tubing_{d.get('seqNum', int(ts.timestamp()))}",
                 ))
             except Exception as ex:

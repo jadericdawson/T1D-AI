@@ -321,6 +321,39 @@ export interface HistoricalIobCobPoint {
   actualBg?: number    // Actual BG reading at this time (for comparison)
 }
 
+export interface PumpStatus {
+  battery_percent: number | null
+  battery_millivolts: number | null
+  current_mode: string | null
+  mode_changed_at: string | null
+  control_mode: string | null
+  control_mode_changed_at: string | null
+  is_suspended: boolean
+  last_suspend_reason: string | null
+  last_suspend_at: string | null
+  last_alert: string | null
+  last_alert_at: string | null
+  last_alarm: string | null
+  last_alarm_at: string | null
+  last_site_change_at: string | null
+  site_age_hours: number | null
+  last_cartridge_change_at: string | null
+  last_cartridge_volume: number | null
+  last_tubing_fill_at: string | null
+  pump_iob: number | null
+  insulin_remaining: number | null
+  daily_basal_units: number | null
+  daily_bolus_units: number | null
+  daily_total_insulin: number | null
+  daily_carbs: number | null
+  daily_auto_corrections: number | null
+  sensor_type: string | null
+  last_updated: string | null
+  recent_alerts: Array<{ alert: string; at: string }>
+  recent_alarms: Array<{ alarm: string; at: string }>
+  recent_mode_changes: Array<{ from: string; to: string; at: string }>
+}
+
 export interface GlucoseCurrentResponse {
   glucose: GlucoseWithPredictions
   metrics: CurrentMetrics
@@ -482,6 +515,13 @@ export const glucoseApi = {
   getRangeStats: async (userId: string = 'demo_user', hours: number = 24): Promise<RangeStats> => {
     const response = await api.get('/glucose/range-stats', {
       params: { user_id: userId, hours }
+    })
+    return response.data
+  },
+
+  getPumpStatus: async (userId: string): Promise<PumpStatus | null> => {
+    const response = await api.get('/glucose/pump-status', {
+      params: { user_id: userId }
     })
     return response.data
   },

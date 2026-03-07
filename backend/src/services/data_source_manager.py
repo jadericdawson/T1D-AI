@@ -528,15 +528,13 @@ class DataSourceManager:
             except Exception as e:
                 logger.warning(f"Could not look up Gluroo credentials for Tandem push: {e}")
 
-            # First sync or reconnect: 7-day backfill; otherwise incremental.
-            # Tandem API returns events with timestamps lagging hours behind
-            # the requested window, so use a 24-hour lookback for incremental
-            # sync. CosmosDB upserts handle dedup.
+            # Always use 7-day lookback — the Tandem API returns a fixed block
+            # of ~1500 events regardless of range, so broader lookback has no
+            # extra cost and ensures we catch site changes, cartridge fills, etc.
+            # that happen every 2-3 days. CosmosDB upserts handle dedup.
+            since = datetime.now(timezone.utc) - timedelta(days=7)
             if not source.lastSyncAt:
-                since = datetime.now(timezone.utc) - timedelta(days=7)
-                logger.info(f"[{profile.displayName}] Tandem full backfill (7 days)")
-            else:
-                since = source.lastSyncAt - timedelta(hours=24)
+                logger.info(f"[{profile.displayName}] Tandem initial sync (7 days)")
 
             tandem_service = TandemSyncService()
             result = await tandem_service.sync_for_source(
