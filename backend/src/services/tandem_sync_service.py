@@ -3,14 +3,15 @@ Tandem Sync Service - Fetches pump data from Tandem, writes to CosmosDB and Glur
 
 Data flow:
   All treatments:   Tandem API -> CosmosDB (direct write)
-  Bolus + Carbs:    Tandem API -> Gluroo (Nightscout API) for mobile app visibility
+  Bolus + Carbs:    Tandem API -> Gluroo (Nightscout API) as Correction Bolus / Carb Correction
+  Basal rates:      Tandem API -> Gluroo (Nightscout API) as Temp Basal (~24/day hourly)
 
 Gluroo sync skips entries with enteredBy='tandem-sync' to avoid duplicates,
 so all Tandem data must be written directly to CosmosDB.
 """
 import hashlib
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
 import httpx
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 class TandemSyncService:
-    """Fetches Tandem pump data. Writes all treatments to CosmosDB, pushes bolus/carbs to Gluroo."""
+    """Fetches Tandem pump data. Writes all treatments to CosmosDB, pushes bolus/carbs/basal to Gluroo."""
 
     def __init__(self):
         self._treatment_repo = None
@@ -52,7 +53,7 @@ class TandemSyncService:
         Run one sync cycle for a single Tandem data source.
 
         - All treatments (basal, bolus, carbs) -> CosmosDB directly
-        - Bolus/carb treatments -> also pushed to Gluroo for mobile app visibility
+        - Bolus/carb/basal treatments -> also pushed to Gluroo for mobile app visibility
         """
         until = until or datetime.now(timezone.utc)
         logger.info(f"Tandem sync for {user_id}: {since.isoformat()} to {until.isoformat()}")
@@ -85,18 +86,24 @@ class TandemSyncService:
             except Exception as e:
                 logger.warning(f"Failed to upsert treatment {t.id}: {e}")
 
-        # Also push bolus/carb treatments to Gluroo for mobile app visibility
-        gluroo_count = 0
-        if gluroo_url and gluroo_api_secret and bolus_treatments:
-            gluroo_count = self._push_to_gluroo(
-                bolus_treatments, gluroo_url, gluroo_api_secret
-            )
+        # Also push treatments to Gluroo for mobile app visibility
+        gluroo_bolus_count = 0
+        gluroo_basal_count = 0
+        if gluroo_url and gluroo_api_secret:
+            if bolus_treatments:
+                gluroo_bolus_count = self._push_to_gluroo(
+                    bolus_treatments, gluroo_url, gluroo_api_secret
+                )
+            if basal_treatments:
+                gluroo_basal_count = self._push_basal_to_gluroo(
+                    basal_treatments, gluroo_url, gluroo_api_secret
+                )
 
         total = basal_count + bolus_count + carb_count
         logger.info(
             f"Tandem sync complete for {user_id}: "
             f"{basal_count} basal + {bolus_cosmos_count} bolus/carbs -> CosmosDB, "
-            f"{gluroo_count}/{len(bolus_treatments)} bolus+carbs -> Gluroo"
+            f"{gluroo_bolus_count} bolus+carbs + {gluroo_basal_count} basal -> Gluroo"
         )
 
         return {
@@ -104,7 +111,7 @@ class TandemSyncService:
             "bolus": bolus_count,
             "carbs": carb_count,
             "total": total,
-            "gluroo": gluroo_count,
+            "gluroo": gluroo_bolus_count + gluroo_basal_count,
         }
 
     def _push_to_gluroo(
@@ -182,6 +189,74 @@ class TandemSyncService:
             logger.info(f"Gluroo push: {pushed} new, {skipped} skipped (already exist)")
         return pushed
 
+    def _push_basal_to_gluroo(
+        self,
+        treatments: List[T1DAITreatment],
+        gluroo_url: str,
+        api_secret: str,
+    ) -> int:
+        """Push aggregated basal treatments to Gluroo as Temp Basal entries."""
+        base = gluroo_url.rstrip('/')
+        secret_hash = hashlib.sha1(api_secret.encode()).hexdigest()
+        headers = {
+            "API-SECRET": secret_hash,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        # Get existing Temp Basal timestamps for dedup
+        existing_ts: set = set()
+        try:
+            with httpx.Client(timeout=15) as client:
+                resp = client.get(
+                    f"{base}/api/v1/treatments.json",
+                    params={"count": 500, "find[eventType]": "Temp Basal"},
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                for entry in resp.json():
+                    existing_ts.add(entry.get("created_at", ""))
+        except Exception as e:
+            logger.warning(f"Could not fetch existing Gluroo basal entries: {e}")
+
+        pushed = 0
+        skipped = 0
+        for treatment in treatments:
+            if treatment.type != "basal":
+                continue
+
+            ts = treatment.timestamp
+            if ts in existing_ts:
+                skipped += 1
+                continue
+
+            entry = {
+                "eventType": "Temp Basal",
+                "created_at": ts,
+                "duration": treatment.durationMinutes or 60,
+                "rate": treatment.basalRate or 0,
+                "absolute": treatment.basalRate or 0,
+                "enteredBy": "tandem-sync",
+            }
+
+            try:
+                with httpx.Client(timeout=10) as client:
+                    resp = client.post(
+                        f"{base}/api/v1/treatments",
+                        json=entry,
+                        headers=headers,
+                    )
+                    resp.raise_for_status()
+                    pushed += 1
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"Gluroo basal push failed: {e.response.status_code}")
+            except Exception as e:
+                logger.warning(f"Gluroo basal push error: {e}")
+
+        if pushed > 0 or skipped > 0:
+            logger.info(f"Gluroo basal push: {pushed} new, {skipped} skipped")
+        return pushed
+
     # Nightscout event type mapping (matches proven standalone gluroo_writer.py)
     _EVENT_TYPE_MAP = {
         "insulin": "Correction Bolus",
@@ -195,14 +270,20 @@ class TandemSyncService:
 
         Uses separate entries per treatment (not combined Meal Bolus),
         which is the proven format that displays correctly in Gluroo.
+
+        Carb entries use a +1 second timestamp offset because Gluroo silently
+        drops entries at timestamps that already have another entry (e.g. the
+        bolus). This offset ensures both insulin and carbs are stored.
         """
         event_type = cls._EVENT_TYPE_MAP.get(treatment.type)
         if event_type is None:
             return None
 
+        timestamp = treatment.timestamp
+
         entry = {
             "eventType": event_type,
-            "created_at": treatment.timestamp,
+            "created_at": timestamp,
             "enteredBy": "tandem-sync",
             "notes": treatment.notes or "",
         }
@@ -213,8 +294,20 @@ class TandemSyncService:
                 entry["notes"] = f"[{treatment.bolusType}] {entry['notes']}".strip()
         elif treatment.type == "carbs":
             entry["carbs"] = treatment.carbs
+            # Offset by +1 second to avoid Gluroo's silent timestamp dedup
+            entry["created_at"] = cls._offset_timestamp(timestamp, seconds=1)
 
         return entry
+
+    @staticmethod
+    def _offset_timestamp(iso_ts: str, seconds: int = 1) -> str:
+        """Add seconds to an ISO timestamp string."""
+        try:
+            dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+            dt += timedelta(seconds=seconds)
+            return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        except (ValueError, AttributeError):
+            return iso_ts
 
     async def test_connection(self, email: str, password: str) -> tuple[bool, str]:
         """Test Tandem API credentials."""
