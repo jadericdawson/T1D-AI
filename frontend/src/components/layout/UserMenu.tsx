@@ -7,7 +7,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   User, Settings, LogOut, Database, Brain, Link2, Shield,
   HelpCircle, MessageSquare, ChevronRight, Moon, Sun, Bell,
-  Share2, Activity
+  Share2, Activity, Plug
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -138,6 +138,12 @@ export function UserMenu({ className, trigger, align = 'end' }: UserMenuProps) {
         <DropdownMenuItem onClick={() => navigate('/settings?tab=sharing')}>
           <Share2 className="mr-2 h-4 w-4" />
           Sharing & Access
+          <ChevronRight className="ml-auto h-4 w-4 text-muted-foreground" />
+        </DropdownMenuItem>
+
+        <DropdownMenuItem onClick={() => navigate('/settings?tab=integrations')}>
+          <Plug className="mr-2 h-4 w-4" />
+          Integrations
           <ChevronRight className="ml-auto h-4 w-4 text-muted-foreground" />
         </DropdownMenuItem>
 
