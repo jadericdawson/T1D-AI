@@ -1616,4 +1616,32 @@ export const profilesApi = {
   },
 }
 
+// ==================== Home Assistant API ====================
+
+export interface ApiKey {
+  id: string
+  name: string
+  key?: string
+  key_prefix: string
+  profile_id?: string
+  created_at: string
+  last_used_at?: string
+}
+
+export const homeAssistantApi = {
+  createApiKey: async (name: string, profileId?: string): Promise<ApiKey> => {
+    const response = await api.post('/ha/api-keys', { name, profile_id: profileId })
+    return response.data
+  },
+
+  listApiKeys: async (): Promise<ApiKey[]> => {
+    const response = await api.get('/ha/api-keys')
+    return response.data.keys
+  },
+
+  revokeApiKey: async (keyId: string): Promise<void> => {
+    await api.delete(`/ha/api-keys/${keyId}`)
+  },
+}
+
 export default api

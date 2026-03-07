@@ -311,7 +311,7 @@ async def root():
 
 
 # Import and register API routers
-from api.v1 import glucose, treatments, datasources, predictions, calculations, users, insights, websocket, sharing, training, profiles, admin
+from api.v1 import glucose, treatments, datasources, predictions, calculations, users, insights, websocket, sharing, training, profiles, admin, homeassistant
 from auth import auth_router
 
 # Authentication router (no /api prefix for cleaner URLs)
@@ -329,6 +329,7 @@ app.include_router(insights.router, prefix="/api/v1", tags=["Insights"])
 app.include_router(sharing.router, prefix="/api/v1", tags=["Sharing"])
 app.include_router(training.router, prefix="/api/v1", tags=["Training"])
 app.include_router(admin.router, prefix="/api/v1", tags=["Admin"])
+app.include_router(homeassistant.router, prefix="/api/v1", tags=["Home Assistant"])
 
 # WebSocket router
 app.include_router(websocket.router, prefix="/api/v1", tags=["WebSocket"])

@@ -9,7 +9,7 @@ import {
   Activity, ArrowLeft, User, Droplet, Bell,
   Moon, Trash2, Save, Loader2, Check, AlertCircle,
   RefreshCw, ExternalLink, LogOut, Shield,
-  Share2, Link2, Settings2, Wifi, HelpCircle, Users
+  Share2, Link2, Settings2, Wifi, HelpCircle, Users, Plug
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -40,6 +40,7 @@ import {
 import { ResponsiveLayout } from '@/components/layout/ResponsiveLayout'
 import { SharingManager } from '@/components/sharing/SharingManager'
 import { ProfilesManager } from '@/components/profiles/ProfilesManager'
+import { HomeAssistantKeys } from '@/components/settings/HomeAssistantKeys'
 import { cn } from '@/lib/utils'
 import { useGlucoseStore } from '@/stores/glucoseStore'
 import { useAuthStore } from '@/stores/authStore'
@@ -60,6 +61,7 @@ const TABS = [
   { id: 'insulin', label: 'Insulin', icon: Droplet },
   { id: 'alerts', label: 'Alerts', icon: Bell },
   { id: 'sharing', label: 'Sharing', icon: Share2 },
+  { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'security', label: 'Security', icon: Shield },
   { id: 'display', label: 'Display', icon: Moon },
 ]
@@ -1040,6 +1042,12 @@ export default function Settings() {
           </TabsContent>
 
           {/* Security Tab */}
+          <TabsContent value="integrations">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+              <HomeAssistantKeys />
+            </motion.div>
+          </TabsContent>
+
           <TabsContent value="security">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
               <Card>
