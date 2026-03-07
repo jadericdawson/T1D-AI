@@ -968,13 +968,15 @@ export default function Dashboard() {
               />
             </div>
 
-            {/* Pump Status */}
-            <div className="mt-4 pt-4 border-t border-slate-700">
-              <PumpStatusCard
-                pumpStatus={pumpStatus ?? null}
-                isLoading={isLoadingPump}
-              />
-            </div>
+            {/* Pump Status - only show when Tandem data is available */}
+            {pumpStatus && (
+              <div className="mt-4 pt-4 border-t border-slate-700">
+                <PumpStatusCard
+                  pumpStatus={pumpStatus}
+                  isLoading={isLoadingPump}
+                />
+              </div>
+            )}
           </div>
         </motion.div>
 
