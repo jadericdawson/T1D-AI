@@ -2007,3 +2007,28 @@ class ProfileDataSourceRepository(BaseRepository):
             partition_key=profile_id
         ))
         return [ProfileDataSource(**item) for item in items]
+
+
+class PumpStatusRepository(BaseRepository):
+    """Repository for pump status snapshots.
+
+    Stores a single document per user, upserted each sync cycle with the latest
+    pump state (battery, mode, control mode, alerts, site change, etc.).
+    """
+
+    def __init__(self):
+        super().__init__("pump_status", "userId")
+
+    async def get(self, user_id: str) -> Optional[dict]:
+        """Get the pump status document for a user."""
+        doc_id = f"{user_id}_pump_status"
+        try:
+            result = self.container.read_item(item=doc_id, partition_key=user_id)
+            return result
+        except exceptions.CosmosResourceNotFoundError:
+            return None
+
+    async def upsert(self, status_dict: dict) -> dict:
+        """Upsert pump status document."""
+        result = self.container.upsert_item(body=status_dict)
+        return result

@@ -81,6 +81,7 @@ class CosmosDBManager:
             ("profiles", "/accountId"),  # Managed profiles (one account can manage multiple people)
             ("profile_data_sources", "/profileId"),  # Data sources per profile (Gluroo, Dexcom, etc.)
             ("api_keys", "/userId"),  # API keys for Home Assistant and other integrations
+            ("pump_status", "/userId"),  # Pump status snapshot (battery, mode, alerts, etc.)
         ]
 
         for container_name, partition_key in containers:

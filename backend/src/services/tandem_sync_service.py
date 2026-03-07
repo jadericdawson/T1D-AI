@@ -5,6 +5,7 @@ Data flow:
   All treatments:   Tandem API -> CosmosDB (direct write)
   Bolus + Carbs:    Tandem API -> Gluroo (Nightscout API) as Correction Bolus / Carb Correction
   Basal rates:      Tandem API -> Gluroo (Nightscout API) as Temp Basal (~24/day hourly)
+  Pump status:      Tandem API -> CosmosDB pump_status container (battery, mode, alerts, etc.)
 
 Gluroo sync skips entries with enteredBy='tandem-sync' to avoid duplicates,
 so all Tandem data must be written directly to CosmosDB.
@@ -31,6 +32,7 @@ class TandemSyncService:
 
     def __init__(self):
         self._treatment_repo = None
+        self._pump_status_repo = None
 
     @property
     def treatment_repo(self):
@@ -38,6 +40,13 @@ class TandemSyncService:
             from database.repositories import TreatmentRepository
             self._treatment_repo = TreatmentRepository()
         return self._treatment_repo
+
+    @property
+    def pump_status_repo(self):
+        if self._pump_status_repo is None:
+            from database.repositories import PumpStatusRepository
+            self._pump_status_repo = PumpStatusRepository()
+        return self._pump_status_repo
 
     async def sync_for_source(
         self,
@@ -54,17 +63,18 @@ class TandemSyncService:
 
         - All treatments (basal, bolus, carbs) -> CosmosDB directly
         - Bolus/carb/basal treatments -> also pushed to Gluroo for mobile app visibility
+        - Pump status snapshot -> CosmosDB pump_status container
         """
         until = until or datetime.now(timezone.utc)
         logger.info(f"Tandem sync for {user_id}: {since.isoformat()} to {until.isoformat()}")
 
-        # Fetch from Tandem API
+        # Fetch ALL event types from Tandem API
         adapter = TandemApiAdapter(email, password)
-        basal_events, bolus_events = adapter.fetch_all(since, until)
+        fetch_result = adapter.fetch_all_expanded(since, until)
 
-        # Transform
-        basal_treatments = aggregate_basal_events(basal_events, user_id)
-        bolus_treatments = map_bolus_events(bolus_events, user_id)
+        # Transform treatments (existing logic)
+        basal_treatments = aggregate_basal_events(fetch_result.basal_events, user_id)
+        bolus_treatments = map_bolus_events(fetch_result.bolus_events, user_id)
 
         bolus_count = sum(1 for t in bolus_treatments if t.type != "carbs")
         carb_count = sum(1 for t in bolus_treatments if t.type == "carbs")
@@ -85,6 +95,14 @@ class TandemSyncService:
                 bolus_cosmos_count += 1
             except Exception as e:
                 logger.warning(f"Failed to upsert treatment {t.id}: {e}")
+
+        # Build and upsert pump_status document from expanded events
+        try:
+            pump_status = self._build_pump_status(user_id, fetch_result)
+            await self.pump_status_repo.upsert(pump_status)
+            logger.info(f"Pump status upserted for {user_id}")
+        except Exception as e:
+            logger.warning(f"Failed to upsert pump status for {user_id}: {e}")
 
         # Also push treatments to Gluroo for mobile app visibility
         gluroo_bolus_count = 0
@@ -113,6 +131,110 @@ class TandemSyncService:
             "total": total,
             "gluroo": gluroo_bolus_count + gluroo_basal_count,
         }
+
+    def _build_pump_status(self, user_id: str, result) -> dict:
+        """Build a pump_status document from the most recent events of each type."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        status = {
+            "id": f"{user_id}_pump_status",
+            "userId": user_id,
+            "last_updated": now,
+        }
+
+        # Battery and daily totals from most recent daily basal event
+        if result.daily_basal_events:
+            latest = result.daily_basal_events[-1]
+            status["battery_percent"] = latest.battery_percent
+            status["battery_millivolts"] = latest.battery_millivolts
+            status["daily_basal_units"] = latest.daily_basal_units
+            status["daily_bolus_units"] = latest.daily_bolus_units
+            status["daily_total_insulin"] = latest.daily_total_insulin
+            status["pump_iob"] = latest.pump_iob
+            status["battery_updated_at"] = latest.timestamp.isoformat()
+
+        # Current Control-IQ mode
+        if result.mode_changes:
+            latest = result.mode_changes[-1]
+            status["current_mode"] = latest.current_mode
+            status["mode_changed_at"] = latest.timestamp.isoformat()
+            # Recent mode changes (last 10)
+            status["recent_mode_changes"] = [
+                {
+                    "from": mc.previous_mode,
+                    "to": mc.current_mode,
+                    "at": mc.timestamp.isoformat(),
+                }
+                for mc in result.mode_changes[-10:]
+            ]
+
+        # Current pump control mode (ClosedLoop, OpenLoop, etc.)
+        if result.pcm_changes:
+            latest = result.pcm_changes[-1]
+            status["control_mode"] = latest.current_pcm
+            status["control_mode_changed_at"] = latest.timestamp.isoformat()
+
+        # Suspend state
+        if result.suspend_events:
+            latest = result.suspend_events[-1]
+            status["is_suspended"] = latest.action == "suspended"
+            status["last_suspend_action"] = latest.action
+            status["last_suspend_reason"] = latest.reason
+            status["last_suspend_at"] = latest.timestamp.isoformat()
+
+        # Alerts (last 10)
+        if result.alerts:
+            latest = result.alerts[-1]
+            status["last_alert"] = latest.alert_type
+            status["last_alert_at"] = latest.timestamp.isoformat()
+            status["recent_alerts"] = [
+                {"alert": a.alert_type, "at": a.timestamp.isoformat()}
+                for a in result.alerts[-10:]
+            ]
+
+        # Alarms (last 10)
+        if result.alarms:
+            latest = result.alarms[-1]
+            status["last_alarm"] = latest.alarm_type
+            status["last_alarm_at"] = latest.timestamp.isoformat()
+            status["recent_alarms"] = [
+                {"alarm": a.alarm_type, "at": a.timestamp.isoformat()}
+                for a in result.alarms[-10:]
+            ]
+
+        # Site change
+        if result.site_changes:
+            latest = result.site_changes[-1]
+            status["last_site_change_at"] = latest.timestamp.isoformat()
+            hours = (datetime.now(timezone.utc) - latest.timestamp).total_seconds() / 3600
+            status["site_age_hours"] = round(hours, 1)
+
+        # Cartridge
+        if result.cartridge_events:
+            latest = result.cartridge_events[-1]
+            status["last_cartridge_change_at"] = latest.timestamp.isoformat()
+            status["last_cartridge_volume"] = latest.volume
+
+        # Tubing
+        if result.tubing_events:
+            latest = result.tubing_events[-1]
+            status["last_tubing_fill_at"] = latest.timestamp.isoformat()
+
+        # Daily status (auto corrections)
+        if result.daily_status:
+            latest = result.daily_status[-1]
+            status["daily_auto_corrections"] = latest.auto_corrections_today
+            status["sensor_type"] = latest.sensor_type
+
+        # Daily carbs from bolus events
+        daily_carbs = sum(
+            b.carbs for b in result.bolus_events
+            if b.carbs and b.carbs > 0
+        )
+        if daily_carbs > 0:
+            status["daily_carbs"] = round(daily_carbs, 1)
+
+        return status
 
     def _push_to_gluroo(
         self,
