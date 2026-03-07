@@ -2,7 +2,7 @@
  * Onboarding Wizard
  * 8-step onboarding flow for new users
  */
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -57,10 +57,20 @@ const slideVariants = {
 
 export default function Onboarding() {
   const navigate = useNavigate()
-  const { user, tokens } = useAuthStore()
+  const { user, tokens, sharedWithMe, managedProfiles, setOnboardingCompleted } = useAuthStore()
   const [currentStep, setCurrentStep] = useState(0)
   const [direction, setDirection] = useState(0)
   const [isSaving, setIsSaving] = useState(false)
+
+  // Skip onboarding for follower-only users (have shared profiles, no own data sources)
+  useEffect(() => {
+    const hasOwnDataSources = managedProfiles.some(p => p.dataSourceCount > 0)
+    if (!hasOwnDataSources && sharedWithMe.length > 0) {
+      console.log('[Onboarding] Follower-only user detected, skipping onboarding')
+      setOnboardingCompleted(true)
+      navigate('/dashboard', { replace: true })
+    }
+  }, [sharedWithMe, managedProfiles, navigate, setOnboardingCompleted])
 
   // Data sources
   const [currentDataSources, setCurrentDataSources] = useState<string[]>([])

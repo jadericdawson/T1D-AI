@@ -435,10 +435,25 @@ export const useAuthStore = create<AuthState>()(
             console.error('[Auth] Failed to load shared profiles:', sharedResponse.status)
           }
 
+          // Auto-switch to shared profile for follower-only users
+          // (no managed profiles with data sources, but has shared profiles)
+          const { viewingUserId: currentViewingId } = get()
+          const hasOwnDataSources = profiles.some((p: ProfileSummary) => p.dataSourceCount > 0)
+          let autoViewingUserId = currentViewingId
+          let autoViewingUser = get().viewingUser
+
+          if (!hasOwnDataSources && !currentViewingId && sharedUsers.length > 0) {
+            autoViewingUserId = sharedUsers[0].id
+            autoViewingUser = sharedUsers[0]
+            console.log(`[Auth] Follower-only user, auto-switching to shared profile: ${sharedUsers[0].displayName}`)
+          }
+
           set({
             managedProfiles: profiles,
             activeProfileId: newActiveProfileId,
             sharedWithMe: sharedUsers,
+            viewingUserId: autoViewingUserId,
+            viewingUser: autoViewingUser,
             isLoadingProfiles: false,
           })
         } catch (error) {

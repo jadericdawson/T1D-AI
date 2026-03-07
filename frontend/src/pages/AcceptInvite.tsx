@@ -43,7 +43,7 @@ export default function AcceptInvite() {
   const [searchParams] = useSearchParams()
   const token = searchParams.get('token')
 
-  const { isAuthenticated, user, loadProfiles } = useAuthStore()
+  const { isAuthenticated, user, loadProfiles, switchToUser, setOnboardingCompleted, managedProfiles } = useAuthStore()
 
   const [status, setStatus] = useState<'loading' | 'ready' | 'accepting' | 'success' | 'error'>('loading')
   const [invitation, setInvitation] = useState<ShareInvitation | null>(null)
@@ -89,8 +89,21 @@ export default function AcceptInvite() {
       // Reload profiles to include the new share
       await loadProfiles()
 
-      // Redirect to dashboard - the shared profile will now be in the dropdown
-      // Don't auto-switch - let user select from profile dropdown
+      // Auto-switch to the shared profile so they see data immediately
+      const sharedProfileId = invitation.profileId || invitation.ownerEmail
+      const sharedUser = useAuthStore.getState().sharedWithMe.find(
+        s => s.id === sharedProfileId || s.email === invitation.ownerEmail
+      )
+      if (sharedUser) {
+        switchToUser(sharedUser.id, sharedUser)
+      }
+
+      // Skip onboarding for follower-only users (no own data sources configured)
+      const hasOwnDataSources = managedProfiles.some(p => p.dataSourceCount > 0)
+      if (!hasOwnDataSources && user?.onboardingCompleted === false) {
+        setOnboardingCompleted(true)
+      }
+
       setTimeout(() => {
         navigate('/dashboard')
       }, 1500)
