@@ -2,7 +2,8 @@
 Tandem API Adapter using tconnectsync library.
 
 Uses the TandemSource API (pump_events) to fetch basal, bolus, and carb events
-from the Tandem Source portal.
+from the Tandem Source portal. The ControlIQ therapy_timeline endpoint is
+deprecated/broken, so we use the binary pump event stream instead.
 
 Data format notes (from real Tandem Mobi):
 - Basal rates: stored in milliUnits/hr (350 = 0.350 U/hr)
@@ -17,7 +18,7 @@ from typing import List, Optional, Tuple
 
 from tconnectsync.api import TConnectApi
 
-from services.tandem.tandem_models import TandemBasalEvent, TandemBolusEvent
+from models.tandem_models import TandemBasalEvent, TandemBolusEvent
 
 logger = logging.getLogger(__name__)
 
@@ -90,12 +91,27 @@ class TandemApiAdapter:
 
         return basal_events, bolus_events
 
-    def _extract_basal_events(self, raw_events: list, since: datetime, until: datetime) -> List[TandemBasalEvent]:
-        """Extract basal delivery events from raw pump events.
+    def fetch_basal_events(self, since: datetime, until: Optional[datetime] = None) -> List[TandemBasalEvent]:
+        """Fetch basal delivery events."""
+        until = until or datetime.now(timezone.utc)
+        raw_events = self._fetch_raw_events(since, until)
+        return self._extract_basal_events(raw_events, since, until)
 
-        Note: The Tandem API returns events with timestamps that lag hours behind
-        the requested min_date/max_date window. We trust the API's date filtering
-        and do NOT re-filter by since/until here — CosmosDB upserts handle dedup.
+    def fetch_bolus_events(self, since: datetime, until: Optional[datetime] = None) -> List[TandemBolusEvent]:
+        """Fetch bolus events (including auto-corrections and carbs)."""
+        until = until or datetime.now(timezone.utc)
+        raw_events = self._fetch_raw_events(since, until)
+        return self._extract_bolus_events(raw_events, since, until)
+
+    def _extract_basal_events(self, raw_events: list, since: datetime, until: datetime) -> List[TandemBasalEvent]:
+        """
+        Extract basal delivery events from raw pump events.
+
+        LidBasalDelivery events contain:
+        - commandedRate: actual rate in mU/hr
+        - profileBasalRate: scheduled rate in mU/hr
+        - algorithmRate: CIQ-adjusted rate in mU/hr
+        - commandedRateSourceRaw: 3 = algorithm
         """
         events = []
         basal_raw = [e for e in raw_events if type(e).__name__ == "LidBasalDelivery"]
@@ -109,6 +125,7 @@ class TandemApiAdapter:
 
                 commanded_rate_mu = d.get("commandedRate", 0)
                 profile_rate_mu = d.get("profileBasalRate", 0)
+                algorithm_rate_mu = d.get("algorithmRate", 0)
 
                 rate_u_hr = commanded_rate_mu * MU_TO_U
 
@@ -119,7 +136,7 @@ class TandemApiAdapter:
                     next_ts = _parse_event_timestamp(next_d.get("eventTimestamp"))
                     if next_ts:
                         diff = (next_ts - ts).total_seconds()
-                        if 0 < diff <= 900:  # Cap at 15 min
+                        if 0 < diff <= 900:  # Cap at 15 min (avoids gaps)
                             duration_sec = int(diff)
 
                 delivered_units = rate_u_hr * (duration_sec / 3600)
@@ -144,11 +161,11 @@ class TandemApiAdapter:
         return sorted(events, key=lambda e: e.timestamp)
 
     def _extract_bolus_events(self, raw_events: list, since: datetime, until: datetime) -> List[TandemBolusEvent]:
-        """Extract bolus events from raw pump events.
+        """
+        Extract bolus events from raw pump events.
 
-        Note: The Tandem API returns events with timestamps that lag hours behind
-        the requested min_date/max_date window. We trust the API's date filtering
-        and do NOT re-filter by since/until here — CosmosDB upserts handle dedup.
+        Uses LidBolusCompleted (final delivered amount) correlated with
+        LidBolusRequestedMsg1 (bolus type, carbs, BG) via bolusid.
         """
         # Index request data by bolusid for correlation
         request_data = {}
@@ -176,6 +193,7 @@ class TandemApiAdapter:
                 if ts is None:
                     continue
 
+                # insulindelivered from LidBolusCompleted is already in units (decoded by tconnectsync)
                 insulin_u = d.get("insulindelivered", 0)
                 if not isinstance(insulin_u, (int, float)) or insulin_u <= 0:
                     continue
@@ -183,20 +201,25 @@ class TandemApiAdapter:
                 bolus_id = d.get("bolusid")
                 req = request_data.get(bolus_id, {})
 
+                # Determine bolus type from request data
                 bolus_type_raw = req.get("bolustypeRaw", 0)
                 correction_included = req.get("correctionbolusincludedRaw", 0)
                 carbs_from_calc = req.get("carbamount", 0)
 
+                # bolustypeRaw: 2 = auto-correction, 3 = user-initiated
                 if bolus_type_raw == 2:
                     bolus_type = "auto_correction"
                 elif carbs_from_calc and carbs_from_calc > 0:
-                    bolus_type = "standard"
+                    bolus_type = "standard"  # Meal bolus
                 elif correction_included:
-                    bolus_type = "standard"
+                    bolus_type = "standard"  # Correction bolus (user-initiated)
                 else:
                     bolus_type = "standard"
 
+                # insulinrequested is also already in units
                 requested_u = d.get("insulinrequested", 0)
+
+                # Completion status: completionstatusRaw 3 = completed
                 status_raw = d.get("completionstatusRaw", 0)
                 completion = "completed" if status_raw == 3 else "incomplete"
 
@@ -219,7 +242,12 @@ class TandemApiAdapter:
 
 
 def _parse_event_timestamp(value) -> Optional[datetime]:
-    """Parse eventTimestamp from pump events and normalize to UTC."""
+    """Parse eventTimestamp from pump events and normalize to UTC.
+
+    Tandem events use local timezone offsets (e.g., -05:00).
+    We convert to UTC so timestamps match existing Gluroo data in CosmosDB
+    (which uses UTC 'Z' format for string-based timestamp comparisons).
+    """
     if value is None:
         return None
     dt = None
@@ -237,4 +265,5 @@ def _parse_event_timestamp(value) -> Optional[datetime]:
                     continue
     if dt is None:
         return None
+    # Convert to UTC
     return dt.astimezone(timezone.utc)
