@@ -294,7 +294,7 @@ export default function Dashboard() {
   // WebSocket for real-time updates with Gluroo sync notifications
   const { isConnected, connectionStatus, forceRefreshAllData, forceReconnect } = useGlucoseWebSocket({
     userId,
-    interval: 60,
+    interval: 30,
     onGlurooSync: handleGlurooSync,
     onMessage: (data) => {
       // IMPORTANT: Ignore WebSocket messages during profile switch to prevent data leaks

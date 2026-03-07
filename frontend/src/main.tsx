@@ -17,6 +17,9 @@ const queryClient = new QueryClient({
     queries: {
       staleTime: 30000, // 30 seconds
       refetchInterval: 60000, // 1 minute for glucose updates
+      refetchOnWindowFocus: true, // Refetch when tab regains focus
+      refetchOnReconnect: true, // Refetch when network recovers
+      retry: 2,
     },
   },
 })
