@@ -8,6 +8,11 @@ Uses treatment-anchored approach:
 4. Learn ISF from clean, validated data
 
 ISF = how much 1 unit of insulin drops blood glucose (mg/dL per unit)
+
+Pump-aware mode:
+- Detects pump users automatically from treatment data
+- Calculates net correction insulin (above basal) for accurate ISF
+- Lowers minimum insulin threshold for pump auto-corrections
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -19,7 +24,7 @@ from database.repositories import (
 )
 from models.schemas import LearnedISF, ISFDataPoint, Treatment, GlucoseReading
 from ml.training.treatment_anchored_selector import (
-    TreatmentAnchoredSelector, TreatmentType, AnchoredTreatmentMoment
+    TreatmentAnchoredSelector, TreatmentType, AnchoredTreatmentMoment, is_pump_user
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +38,11 @@ class ISFLearner:
     - Only uses documented treatment moments
     - Validates that BG behavior is explainable
     - Rejects data where undocumented treatments likely occurred
+
+    Pump-aware:
+    - Auto-detects pump users from treatment deliveryMethod
+    - Subtracts expected basal insulin to isolate correction effect
+    - Lowers min_insulin_units for pump auto-corrections
     """
 
     def __init__(self):
@@ -48,6 +58,21 @@ class ISFLearner:
         self.max_isf = 150                 # Maximum valid ISF
         self.min_confidence = 0.4          # Minimum confidence to include
 
+        # Pump-specific overrides (set during auto-detection)
+        self._pump_aware = False
+
+    async def _auto_detect_pump(self, user_id: str) -> None:
+        """Auto-detect pump user and configure selector accordingly."""
+        start_time = datetime.now(timezone.utc) - timedelta(days=7)
+        treatments = await self.treatment_repo.get_by_user(
+            user_id=user_id, start_time=start_time, limit=500
+        )
+        self._pump_aware = is_pump_user(treatments)
+        if self._pump_aware:
+            logger.info(f"Pump user detected for ISF learning (user {user_id})")
+            self.selector = TreatmentAnchoredSelector(pump_aware=True)
+            self.min_insulin_units = 0.3  # Auto-corrections are often 0.2-0.65U
+
     async def learn_fasting_isf(self, user_id: str, days: int = 30) -> Optional[LearnedISF]:
         """
         Learn fasting ISF from clean correction boluses.
@@ -57,6 +82,8 @@ class ISFLearner:
         - BG behavior is explainable (drops, doesn't unexpectedly rise)
         - No undocumented carbs detected
 
+        For pump users, calculates net correction (above basal) for accurate ISF.
+
         Args:
             user_id: User ID to learn ISF for
             days: Number of days of history to analyze
@@ -64,6 +91,8 @@ class ISFLearner:
         Returns:
             Updated LearnedISF or None if insufficient data
         """
+        await self._auto_detect_pump(user_id)
+
         # Get clean insulin-only moments using anchored selector
         moments = await self.selector.get_clean_moments(
             user_id=user_id,
@@ -89,7 +118,20 @@ class ISFLearner:
             if bg_drop < self.min_bg_change:
                 continue
 
-            isf = bg_drop / moment.insulin_units
+            # For pump users, calculate net correction insulin (above basal)
+            effective_insulin = moment.insulin_units
+            if self._pump_aware and moment.hourly_basal_rate > 0:
+                window_hours = self.selector.bg_window_after_min / 60.0
+                expected_basal = moment.hourly_basal_rate * window_hours
+                total_window_insulin = moment.insulin_units + moment.background_insulin
+                net_correction = total_window_insulin - expected_basal
+                if net_correction > 0.2:
+                    effective_insulin = net_correction
+                else:
+                    # Net correction too small — basal alone explains the drop
+                    continue
+
+            isf = bg_drop / effective_insulin
 
             # Sanity check
             if not (self.min_isf <= isf <= self.max_isf):
@@ -118,7 +160,7 @@ class ISFLearner:
         final_isf = await self._compute_weighted_isf(user_id, "fasting", isf_events)
         logger.info(
             f"Learned fasting ISF for user {user_id}: {final_isf.value:.1f} "
-            f"(n={len(isf_events)}, confidence={final_isf.confidence:.2f})"
+            f"(n={len(isf_events)}, confidence={final_isf.confidence:.2f}, pump_aware={self._pump_aware})"
         )
 
         return final_isf
@@ -143,6 +185,8 @@ class ISFLearner:
         Returns:
             Updated LearnedISF or None if insufficient data
         """
+        await self._auto_detect_pump(user_id)
+
         # Get clean meal moments
         moments = await self.selector.get_clean_moments(
             user_id=user_id,
@@ -180,7 +224,17 @@ class ISFLearner:
                 # Insulin didn't seem to do much - skip
                 continue
 
-            isf = estimated_insulin_drop / moment.insulin_units
+            # For pump users, use net insulin above basal
+            effective_insulin = moment.insulin_units
+            if self._pump_aware and moment.hourly_basal_rate > 0:
+                window_hours = self.selector.bg_window_after_min / 60.0
+                expected_basal = moment.hourly_basal_rate * window_hours
+                total_window_insulin = moment.insulin_units + moment.background_insulin
+                net_correction = total_window_insulin - expected_basal
+                if net_correction > 0.2:
+                    effective_insulin = net_correction
+
+            isf = estimated_insulin_drop / effective_insulin
 
             # Sanity check
             if not (self.min_isf <= isf <= self.max_isf):
@@ -278,6 +332,8 @@ class ISFLearner:
             - confidence: Confidence in the calculation (0-1)
             - data_points: List of recent ISF observations
         """
+        await self._auto_detect_pump(user_id)
+
         # Get baseline ISF from database first (needed for deviation calculations)
         baseline_isf = 55.0  # Default
         try:
@@ -324,7 +380,19 @@ class ISFLearner:
             if bg_drop < 10:  # Lower threshold - even small drops count
                 continue
 
-            isf = bg_drop / moment.insulin_units
+            # For pump users, calculate net correction insulin
+            effective_insulin = moment.insulin_units
+            if self._pump_aware and moment.hourly_basal_rate > 0:
+                window_hours = self.selector.bg_window_after_min / 60.0
+                expected_basal = moment.hourly_basal_rate * window_hours
+                total_window_insulin = moment.insulin_units + moment.background_insulin
+                net_correction = total_window_insulin - expected_basal
+                if net_correction > 0.2:
+                    effective_insulin = net_correction
+                else:
+                    continue
+
+            isf = bg_drop / effective_insulin
 
             # Sanity check - wider range for detecting resistance
             if not (10 <= isf <= 200):

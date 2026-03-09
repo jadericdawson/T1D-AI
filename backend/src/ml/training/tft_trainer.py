@@ -94,7 +94,7 @@ class TFTTrainingConfig:
     """Configuration for TFT training pipeline."""
 
     # Model architecture
-    n_features: int = 69
+    n_features: int = 74
     hidden_size: int = 64
     n_heads: int = 4
     n_lstm_layers: int = 2

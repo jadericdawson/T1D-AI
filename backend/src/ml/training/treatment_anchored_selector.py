@@ -12,11 +12,18 @@ Approach:
 5. If not explainable → something undocumented happened, skip
 
 This replaces time-based filtering with intelligence-based filtering.
+
+Pump-aware mode:
+- Detects pump users automatically from deliveryMethod fields
+- Excludes basal micro-doses and small auto-corrections from moment detection
+- Tracks background insulin (basal + auto-correction) for learners to use
+- Reduces isolation gap since pump users always have overlapping insulin
+- Increases unexplained drop tolerance (basal is always lowering BG)
 """
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple, Dict, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import numpy as np
 
@@ -78,6 +85,24 @@ class AnchoredTreatmentMoment:
     treatment_id: str
     meal_description: Optional[str] = None
 
+    # Pump-aware fields
+    background_insulin: float = 0.0    # Basal + auto-correction insulin in observation window
+    hourly_basal_rate: float = 0.0     # Average basal rate during window (U/hr)
+
+
+def is_pump_user(treatments: List[Treatment]) -> bool:
+    """
+    Detect if user is a pump user by checking deliveryMethod fields.
+    Auto-detection, no config needed.
+    """
+    pump_methods = {"pump_basal", "pump_bolus", "pump_auto_correction"}
+    pump_count = sum(
+        1 for t in treatments
+        if getattr(t, 'deliveryMethod', None) in pump_methods
+    )
+    # If >10% of treatments have pump delivery methods, it's a pump user
+    return len(treatments) > 0 and (pump_count / len(treatments)) > 0.10
+
 
 class TreatmentAnchoredSelector:
     """
@@ -101,6 +126,9 @@ class TreatmentAnchoredSelector:
         # Data quality
         min_bg_readings_in_window: int = 8,  # Need at least 8 readings (~40 min of CGM)
         max_bg_gap_min: int = 30,            # Max gap between BG readings
+
+        # Pump-aware mode
+        pump_aware: bool = False,            # Enable pump-aware filtering
     ):
         self.glucose_repo = GlucoseRepository()
         self.treatment_repo = TreatmentRepository()
@@ -112,6 +140,14 @@ class TreatmentAnchoredSelector:
         self.min_treatment_gap_min = min_treatment_gap_min
         self.min_bg_readings_in_window = min_bg_readings_in_window
         self.max_bg_gap_min = max_bg_gap_min
+        self.pump_aware = pump_aware
+
+        # Pump-aware overrides
+        if pump_aware:
+            # Reduce isolation gap — pump users always have overlapping basal
+            self.min_treatment_gap_min = min(min_treatment_gap_min, 60)
+            # Increase tolerance for unexplained drops — basal is always lowering BG
+            self.max_unexplained_drop = max_unexplained_drop + 15.0
 
     async def get_anchored_moments(
         self,
@@ -191,7 +227,9 @@ class TreatmentAnchoredSelector:
                 explainability_reason=reason,
                 confidence=confidence,
                 treatment_id=moment["id"],
-                meal_description=moment.get("description")
+                meal_description=moment.get("description"),
+                background_insulin=moment.get("background_insulin", 0.0),
+                hourly_basal_rate=moment.get("hourly_basal_rate", 0.0),
             )
 
             anchored_moments.append(anchored_moment)
@@ -226,6 +264,28 @@ class TreatmentAnchoredSelector:
             if m.is_explainable and m.confidence >= min_confidence
         ]
 
+    def _is_background_pump_treatment(self, treatment: Treatment) -> bool:
+        """
+        Check if a treatment is background pump activity (basal or small auto-correction).
+        These should be excluded from moment detection in pump-aware mode.
+        """
+        if not self.pump_aware:
+            return False
+
+        delivery = getattr(treatment, 'deliveryMethod', None)
+
+        # Basal delivery is always background
+        if delivery == 'pump_basal':
+            return True
+
+        # Small auto-corrections (< 0.5U) are background pump activity
+        if delivery == 'pump_auto_correction':
+            insulin = treatment.insulin or 0
+            if insulin < 0.5:
+                return True
+
+        return False
+
     def _group_treatments_by_moment(
         self,
         treatments: List[Treatment]
@@ -233,6 +293,11 @@ class TreatmentAnchoredSelector:
         """
         Group treatments that happen close together into single moments.
         E.g., carbs logged at 12:00 and insulin at 12:02 = same moment.
+
+        In pump-aware mode:
+        - Excludes basal micro-doses from moment detection
+        - Excludes small auto-corrections (< 0.5U) from moments
+        - Tracks background insulin for each moment
         """
         if not treatments:
             return []
@@ -246,10 +311,27 @@ class TreatmentAnchoredSelector:
         # Sort by timestamp (normalize to handle mixed tz-aware/naive)
         sorted_treatments = sorted(treatments, key=lambda t: normalize_ts(t.timestamp))
 
+        # Separate background treatments from event treatments for pump-aware mode
+        if self.pump_aware:
+            event_treatments = []
+            background_treatments = []
+            for t in sorted_treatments:
+                if self._is_background_pump_treatment(t):
+                    background_treatments.append(t)
+                else:
+                    event_treatments.append(t)
+            logger.info(
+                f"Pump-aware: {len(event_treatments)} event treatments, "
+                f"{len(background_treatments)} background treatments"
+            )
+        else:
+            event_treatments = sorted_treatments
+            background_treatments = []
+
         moments = []
         current_moment = None
 
-        for treatment in sorted_treatments:
+        for treatment in event_treatments:
             ts = treatment.timestamp
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
@@ -300,13 +382,103 @@ class TreatmentAnchoredSelector:
         if current_moment and (current_moment["insulin"] > 0 or current_moment["carbs"] > 0):
             moments.append(current_moment)
 
+        # For pump-aware mode, calculate background insulin for each moment
+        if self.pump_aware and background_treatments:
+            for moment in moments:
+                bg_insulin, basal_rate = self._get_background_insulin_for_moment(
+                    moment["timestamp"],
+                    self.bg_window_after_min,
+                    background_treatments
+                )
+                moment["background_insulin"] = bg_insulin
+                moment["hourly_basal_rate"] = basal_rate
+
         return moments
+
+    def _get_background_insulin_for_moment(
+        self,
+        moment_time: datetime,
+        window_minutes: int,
+        background_treatments: List[Treatment]
+    ) -> Tuple[float, float]:
+        """
+        Calculate background insulin (basal + small auto-corrections) in the
+        observation window after a treatment moment.
+
+        Returns:
+            (total_background_insulin, average_hourly_basal_rate)
+        """
+        window_end = moment_time + timedelta(minutes=window_minutes)
+        total_insulin = 0.0
+        basal_insulin = 0.0
+
+        for t in background_treatments:
+            ts = t.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
+            if moment_time <= ts <= window_end:
+                insulin = t.insulin or 0
+                total_insulin += insulin
+
+                if getattr(t, 'deliveryMethod', None) == 'pump_basal':
+                    basal_insulin += insulin
+
+        # Calculate average hourly basal rate
+        window_hours = window_minutes / 60.0
+        hourly_basal_rate = basal_insulin / window_hours if window_hours > 0 else 0.0
+
+        return total_insulin, hourly_basal_rate
+
+    def get_background_insulin_in_window(
+        self,
+        treatments: List[Treatment],
+        window_start: datetime,
+        window_end: datetime
+    ) -> Tuple[float, float]:
+        """
+        Sum all basal delivery + auto-correction insulin in a time window.
+
+        Args:
+            treatments: All treatments for the user
+            window_start: Start of window
+            window_end: End of window
+
+        Returns:
+            (total_background_insulin, average_hourly_basal_rate)
+        """
+        total_insulin = 0.0
+        basal_insulin = 0.0
+
+        for t in treatments:
+            ts = t.timestamp
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
+            if window_start <= ts <= window_end:
+                delivery = getattr(t, 'deliveryMethod', None)
+                if delivery in ('pump_basal', 'pump_auto_correction'):
+                    insulin = t.insulin or 0
+                    total_insulin += insulin
+                    if delivery == 'pump_basal':
+                        basal_insulin += insulin
+
+        window_hours = (window_end - window_start).total_seconds() / 3600.0
+        hourly_basal_rate = basal_insulin / window_hours if window_hours > 0 else 0.0
+
+        return total_insulin, hourly_basal_rate
 
     def _filter_isolated_moments(
         self,
         moments: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Filter to only moments that are isolated (no nearby treatments)."""
+        """
+        Filter to only moments that are isolated (no nearby treatments).
+
+        In pump-aware mode, only manual boluses and carb entries count as
+        "competing moments" — basal and small auto-corrections don't break isolation.
+        (Background treatments are already excluded from moments in pump-aware mode.)
+        """
         if len(moments) <= 1:
             return moments
 

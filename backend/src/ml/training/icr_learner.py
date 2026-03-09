@@ -8,6 +8,11 @@ Uses treatment-anchored approach:
 4. Learn ICR from clean, validated data
 
 ICR = how many grams of carbs are covered by 1 unit of insulin
+
+Pump-aware mode:
+- Detects pump users automatically from treatment data
+- Includes auto-correction insulin in total meal insulin calculation
+- Subtracts expected basal to isolate carb-covering insulin
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -19,7 +24,7 @@ from database.repositories import (
 )
 from models.schemas import LearnedICR, ICRDataPoint
 from ml.training.treatment_anchored_selector import (
-    TreatmentAnchoredSelector, TreatmentType, AnchoredTreatmentMoment
+    TreatmentAnchoredSelector, TreatmentType, AnchoredTreatmentMoment, is_pump_user
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +43,11 @@ class ICRLearner:
     - If BG returns to ~starting point: bolus was correct, ICR = carbs / carb_insulin
     - If BG ends higher: under-bolused, effective ICR > logged carbs / insulin
     - If BG ends lower: over-bolused, effective ICR < logged carbs / insulin
+
+    Pump-aware:
+    - Auto-detects pump users from treatment deliveryMethod
+    - Includes auto-correction insulin delivered during meal window
+    - Subtracts expected basal to get net carb-covering insulin
     """
 
     def __init__(self):
@@ -57,6 +67,20 @@ class ICRLearner:
         self.default_isf = 50.0           # Default ISF if not learned
         self.min_confidence = 0.4         # Minimum confidence to include
 
+        # Pump-specific overrides (set during auto-detection)
+        self._pump_aware = False
+
+    async def _auto_detect_pump(self, user_id: str) -> None:
+        """Auto-detect pump user and configure selector accordingly."""
+        start_time = datetime.now(timezone.utc) - timedelta(days=7)
+        treatments = await self.treatment_repo.get_by_user(
+            user_id=user_id, start_time=start_time, limit=500
+        )
+        self._pump_aware = is_pump_user(treatments)
+        if self._pump_aware:
+            logger.info(f"Pump user detected for ICR learning (user {user_id})")
+            self.selector = TreatmentAnchoredSelector(pump_aware=True)
+
     async def learn_icr(
         self,
         user_id: str,
@@ -71,6 +95,9 @@ class ICRLearner:
         - Has logged insulin (≥0.5U)
         - BG behavior is explainable by the logged treatments
 
+        For pump users, includes auto-correction insulin in total meal insulin
+        and subtracts expected basal.
+
         Args:
             user_id: User ID to learn ICR for
             days: Number of days of history to analyze
@@ -79,6 +106,8 @@ class ICRLearner:
         Returns:
             Updated LearnedICR or None if insufficient data
         """
+        await self._auto_detect_pump(user_id)
+
         # Get user's learned ISF for correction calculation
         isf = await self._get_user_isf(user_id)
         logger.info(f"Using ISF {isf:.1f} for ICR correction calculation")
@@ -115,12 +144,24 @@ class ICRLearner:
             bg_before = moment.bg_window.bg_before
             bg_after = moment.bg_window.bg_after
 
-            # Correction component: how much insulin was needed to bring BG to target
-            correction_needed = (bg_before - self.target_bg) / isf
-            correction_component = max(0, correction_needed)
+            # For pump users: include auto-correction insulin and subtract basal
+            if self._pump_aware and moment.hourly_basal_rate > 0:
+                window_hours = self.selector.bg_window_after_min / 60.0
+                expected_basal = moment.hourly_basal_rate * window_hours
+                total_meal_insulin = moment.insulin_units + moment.background_insulin
+                net_above_basal = total_meal_insulin - expected_basal
 
-            # Carb insulin: total insulin minus correction
-            carb_insulin = moment.insulin_units - correction_component
+                if net_above_basal < 0.3:
+                    continue
+
+                # Correction component from net insulin
+                correction_needed = max(0, (bg_before - self.target_bg) / isf)
+                carb_insulin = net_above_basal - correction_needed
+            else:
+                # Original calculation for injection users
+                correction_needed = (bg_before - self.target_bg) / isf
+                correction_component = max(0, correction_needed)
+                carb_insulin = moment.insulin_units - correction_component
 
             if carb_insulin < 0.3:
                 # Most of the insulin was correction, not useful for ICR
@@ -162,7 +203,7 @@ class ICRLearner:
                 "fatGrams": moment.fat_grams,
                 "glycemicIndex": moment.glycemic_index,
                 "mealType": meal_type_detected,
-                "correctionComponent": correction_component,
+                "correctionComponent": correction_needed if self._pump_aware else max(0, correction_needed),
                 "confidence": final_confidence,
                 "reason": moment.explainability_reason
             })
@@ -178,7 +219,7 @@ class ICRLearner:
         final_icr = await self._compute_weighted_icr(user_id, storage_meal_type, icr_events)
         logger.info(
             f"Learned {storage_meal_type} ICR for user {user_id}: {final_icr.value:.1f} "
-            f"(n={len(icr_events)}, confidence={final_icr.confidence:.2f})"
+            f"(n={len(icr_events)}, confidence={final_icr.confidence:.2f}, pump_aware={self._pump_aware})"
         )
 
         return final_icr
@@ -254,9 +295,7 @@ class ICRLearner:
 
         2. effective_ICR = current_ISF / carb_sensitivity
 
-        This way ICR properly reflects insulin requirements:
-        - During illness: ISF drops → ICR drops → need more insulin
-        - During exercise: ISF rises → ICR rises → need less insulin
+        For pump users, insulin effect includes auto-correction insulin net of basal.
 
         Returns:
             Dict with:
@@ -267,6 +306,8 @@ class ICRLearner:
             - confidence: Confidence in the calculation (0-1)
             - data_points: List of recent ICR observations
         """
+        await self._auto_detect_pump(user_id)
+
         # Get long-term baseline ICR and ISF
         baseline_icr = 10.0
         learned = await self.icr_repo.get(user_id, "overall")
@@ -320,8 +361,16 @@ class ICRLearner:
 
             # Calculate the BG rise from carbs alone:
             # BG_rise_from_carbs = (BG_after - BG_before) + (insulin_effect)
-            # insulin_effect = insulin_given × current_ISF (how much insulin dropped BG)
-            insulin_effect = moment.insulin_units * current_isf
+            # For pump users, include auto-correction insulin net of basal
+            if self._pump_aware and moment.hourly_basal_rate > 0:
+                window_hours = self.selector.bg_window_after_min / 60.0
+                expected_basal = moment.hourly_basal_rate * window_hours
+                total_insulin = moment.insulin_units + moment.background_insulin
+                net_insulin = total_insulin - expected_basal
+                insulin_effect = max(0, net_insulin) * current_isf
+            else:
+                insulin_effect = moment.insulin_units * current_isf
+
             bg_rise_from_carbs = (bg_after - bg_before) + insulin_effect
 
             # Carb sensitivity = BG rise per gram

@@ -109,6 +109,13 @@ TFT_FEATURE_COLUMNS = [
 
     # Category 12: Time Context (1)
     "secs_since_start",
+
+    # Category 13: Pump Features (5)
+    "basal_rate",              # Current basal rate in U/hr
+    "auto_correction_count",   # Rolling 1-hour count of auto-correction events
+    "auto_correction_insulin", # Rolling 1-hour sum of auto-correction insulin
+    "basal_deviation",         # Current basal vs historical median (Control-IQ adjustments)
+    "is_pump_user",            # Binary flag
 ]
 
 
@@ -887,6 +894,16 @@ def engineer_extended_features(
     # Carb absorption delay (estimated)
     df['carb_absorption_delay'] = 0  # Time to BG peak after meal
 
+    # --- Category 13: Pump Features ---
+    df['basal_rate'] = 0.0
+    df['auto_correction_count'] = 0
+    df['auto_correction_insulin'] = 0.0
+    df['basal_deviation'] = 0.0
+    df['is_pump_user'] = 0
+
+    if treatments_df is not None and not treatments_df.empty:
+        df = _add_pump_features(df, treatments_df)
+
     # Ensure all features exist with defaults
     for col in TFT_FEATURE_COLUMNS:
         if col not in df.columns:
@@ -1015,6 +1032,77 @@ def _add_event_timing_features(
 
         insulin_col = today_treatments.get('insulin', pd.Series([0]))
         df.loc[idx, 'total_insulin_today'] = insulin_col.fillna(0).sum()
+
+    return df
+
+
+def _add_pump_features(
+    df: pd.DataFrame,
+    treatments_df: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Add pump-specific features from treatment data.
+
+    For non-pump users, all pump features remain 0.0 (safe default).
+    Detects pump usage from deliveryMethod field on treatments.
+    """
+    treatments_df = treatments_df.copy()
+    treatments_df['timestamp'] = pd.to_datetime(treatments_df['timestamp'], utc=True)
+
+    # Check if user has pump data
+    has_delivery_method = 'deliveryMethod' in treatments_df.columns
+    if not has_delivery_method:
+        return df
+
+    pump_methods = {'pump_basal', 'pump_bolus', 'pump_auto_correction'}
+    pump_treatments = treatments_df[
+        treatments_df['deliveryMethod'].isin(pump_methods)
+    ] if has_delivery_method else pd.DataFrame()
+
+    if pump_treatments.empty:
+        return df
+
+    # Mark as pump user
+    df['is_pump_user'] = 1
+
+    # Get basal and auto-correction subsets
+    basal_treatments = pump_treatments[
+        pump_treatments['deliveryMethod'] == 'pump_basal'
+    ].copy()
+    auto_corrections = pump_treatments[
+        pump_treatments['deliveryMethod'] == 'pump_auto_correction'
+    ].copy()
+
+    # Calculate historical median basal rate for deviation feature
+    median_basal_rate = 0.0
+    if not basal_treatments.empty and 'basalRate' in basal_treatments.columns:
+        rates = basal_treatments['basalRate'].dropna()
+        if not rates.empty:
+            median_basal_rate = float(rates.median())
+
+    for idx, row in df.iterrows():
+        glucose_time = row['timestamp']
+
+        # 1. Basal rate — most recent basal rate before this timestamp
+        recent_basal = basal_treatments[basal_treatments['timestamp'] <= glucose_time]
+        if not recent_basal.empty and 'basalRate' in recent_basal.columns:
+            latest = recent_basal.iloc[-1]
+            rate = latest.get('basalRate', 0) or 0
+            df.loc[idx, 'basal_rate'] = rate
+            # Deviation from historical median
+            if median_basal_rate > 0:
+                df.loc[idx, 'basal_deviation'] = rate - median_basal_rate
+
+        # 2. Rolling 1-hour auto-correction count and insulin sum
+        window_start = glucose_time - timedelta(hours=1)
+        recent_auto = auto_corrections[
+            (auto_corrections['timestamp'] >= window_start) &
+            (auto_corrections['timestamp'] <= glucose_time)
+        ]
+        if not recent_auto.empty:
+            df.loc[idx, 'auto_correction_count'] = len(recent_auto)
+            insulin_col = recent_auto.get('insulin', pd.Series([0]))
+            df.loc[idx, 'auto_correction_insulin'] = insulin_col.fillna(0).sum()
 
     return df
 

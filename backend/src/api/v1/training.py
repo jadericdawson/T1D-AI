@@ -178,7 +178,7 @@ async def check_eligibility(
     - Minimum 20 treatments (insulin/carbs)
     - At least 7 days of data
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         eligible, reason = await data_loader.check_training_eligibility(
             user_id=user_id,
@@ -219,7 +219,7 @@ async def get_training_status(
     - Active training jobs
     - Recent training history
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         # Get user's model
         user_model = await model_repo.get(user_id, model_type)
@@ -261,7 +261,7 @@ async def start_training(
 
     Check status with /training/status.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         # Check eligibility unless forced
         if not force:
@@ -349,7 +349,7 @@ async def get_job_details(
     current_user: User = Depends(get_current_user)
 ):
     """Get details of a specific training job."""
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         # Query for job
         jobs = await _get_user_jobs(user_id)
@@ -372,7 +372,7 @@ async def list_models(
     current_user: User = Depends(get_current_user)
 ):
     """List all personalized models for the user."""
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         models = await model_repo.get_all_for_user(user_id)
 
@@ -392,7 +392,7 @@ async def delete_model(
     current_user: User = Depends(get_current_user)
 ):
     """Delete a personalized model."""
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         # Delete from blob storage
         model_store = get_model_store()
@@ -422,7 +422,7 @@ async def get_data_stats(
 
     Useful for understanding data quality and coverage.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         stats = await data_loader.get_training_stats(user_id)
         return stats
@@ -612,7 +612,7 @@ async def learn_isf(
 
     Requires at least 7 days of data with insulin doses.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         logger.info(f"Learning ISF for user {user_id} over {days} days")
 
@@ -758,7 +758,7 @@ async def reset_learned_isf(
     Use this if you want to re-learn ISF from scratch,
     for example after changing insulin or becoming more active.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         # Delete both ISF types
         deleted = []
@@ -823,7 +823,7 @@ async def import_historic_isf_data(
     3. Tracks contextual features (time of day, lunar phase, etc.)
     4. Uses validated clean boluses as reference for future detection
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         logger.info(f"Importing historic ISF data for user {user_id}")
 
@@ -890,7 +890,7 @@ async def learn_isf_enhanced(
     - Uses validated profiles to improve future detection
     - Optionally imports from historic bolus_moments.jsonl data
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         logger.info(f"Enhanced ISF learning for user {user_id}")
 
@@ -959,7 +959,7 @@ async def get_isf_for_context(
     - Fasting vs meal state
     - Confidence level
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         isf_value, context_info = await enhanced_isf_learner.get_isf_for_context(
             user_id=user_id,
@@ -1030,7 +1030,7 @@ async def learn_icr(
 
     Returns ICR in grams of carbs per unit of insulin.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         logger.info(f"Learning ICR for user {user_id} over {days} days")
 
@@ -1213,7 +1213,7 @@ async def reset_learned_icr(
 
     Use this to re-learn ICR from scratch if insulin needs have changed.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         deleted = []
 
@@ -1300,7 +1300,7 @@ async def learn_pir(
 
     Returns PIR in grams of protein per unit of insulin.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         logger.info(f"Learning PIR for user {user_id} over {days} days")
 
@@ -1503,7 +1503,7 @@ async def get_protein_timing(
     - Peak time (when protein effect is strongest)
     - Timing advice for extended bolus
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         pir_value, onset, peak = await pir_learner.get_current_pir(user_id, meal_type)
 
@@ -1535,7 +1535,7 @@ async def reset_learned_pir(
 
     Use this to re-learn PIR from scratch if protein sensitivity has changed.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         deleted = []
 
@@ -1589,7 +1589,7 @@ async def get_absorption_profile(
 
     These parameters are used to calculate IOB/COB/POB and BG pressure visualization.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         profile = await absorption_profile_repo.get(user_id)
 
@@ -1658,7 +1658,7 @@ async def learn_absorption_curves_endpoint(
 
     Note: This may take 10-30 seconds as it analyzes many treatments.
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         logger.info(f"Learning absorption curves for user {user_id}, {days} days")
 
@@ -1710,7 +1710,7 @@ async def reset_absorption_profile(
     Use this to re-learn curves from scratch if absorption has changed
     (e.g., new insulin type, injection site changes, etc.)
     """
-    user_id = current_user.id
+    user_id = get_data_user_id(current_user.id)
     try:
         deleted = await absorption_profile_repo.delete(user_id)
 
