@@ -270,6 +270,67 @@ class GlurooSyncService:
         except Exception:
             return None
 
+    def _find_duplicate_treatment(self, doc: dict) -> Optional[dict]:
+        """Check if a treatment with matching content already exists (cross-source dedup).
+
+        Looks for any treatment at the same timestamp (±2 min) with matching
+        carbs/insulin values, regardless of source or document ID.
+        Returns the existing document if found, None otherwise.
+        """
+        ts_str = doc.get('timestamp', '')
+        if not ts_str:
+            return None
+
+        try:
+            ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+            start = (ts - timedelta(minutes=2)).isoformat()
+            end = (ts + timedelta(minutes=2)).isoformat()
+
+            carbs = doc.get('carbs')
+            insulin = doc.get('insulin')
+
+            if carbs and float(carbs) > 0:
+                query = """
+                    SELECT TOP 1 * FROM c
+                    WHERE c.userId = @userId
+                      AND c.timestamp >= @start AND c.timestamp <= @end
+                      AND c.carbs >= @lo AND c.carbs <= @hi
+                """
+                params = [
+                    {"name": "@userId", "value": USER_ID},
+                    {"name": "@start", "value": start},
+                    {"name": "@end", "value": end},
+                    {"name": "@lo", "value": float(carbs) - 0.5},
+                    {"name": "@hi", "value": float(carbs) + 0.5},
+                ]
+            elif insulin and float(insulin) > 0:
+                query = """
+                    SELECT TOP 1 * FROM c
+                    WHERE c.userId = @userId
+                      AND c.timestamp >= @start AND c.timestamp <= @end
+                      AND c.insulin >= @lo AND c.insulin <= @hi
+                """
+                params = [
+                    {"name": "@userId", "value": USER_ID},
+                    {"name": "@start", "value": start},
+                    {"name": "@end", "value": end},
+                    {"name": "@lo", "value": float(insulin) - 0.05},
+                    {"name": "@hi", "value": float(insulin) + 0.05},
+                ]
+            else:
+                return None
+
+            items = list(self.treatment_container.query_items(
+                query=query,
+                parameters=params,
+                partition_key=USER_ID,
+                max_item_count=1,
+            ))
+            return items[0] if items else None
+        except Exception as e:
+            logger.warning(f"Dedup check failed: {e}")
+            return None
+
     def _merge_treatment(self, existing: dict, new_doc: dict) -> dict:
         """
         Merge new Gluroo data with existing document, preserving user edits.
@@ -586,13 +647,33 @@ class GlurooSyncService:
             doc = self.parse_treatment(entry)
             if doc:
                 try:
-                    # Check if treatment already exists in CosmosDB
+                    # Check if treatment already exists by document ID
                     existing = self._get_existing_treatment(doc['id'])
 
                     if existing:
                         # Merge new Gluroo data with existing, preserving user edits
                         doc = self._merge_treatment(existing, doc)
                     else:
+                        # Cross-source dedup: check for matching treatment from any source
+                        # (e.g., Tandem entry at same time with same carbs/insulin)
+                        dup = self._find_duplicate_treatment(doc)
+                        if dup and dup['id'] != doc['id']:
+                            # Sync notes from Gluroo to the existing entry if richer
+                            notes = doc.get('notes', '') or ''
+                            existing_notes = dup.get('notes', '') or ''
+                            if notes and notes != existing_notes and not notes.startswith(('Bolus:', 'Food:')):
+                                dup['notes'] = notes
+                                self.treatment_container.upsert_item(dup)
+                                logger.info(f"Synced notes to existing {dup['source']} entry: '{notes[:50]}'")
+                            logger.debug(
+                                f"Skipping duplicate Gluroo treatment "
+                                f"(matches {dup['id'][:40]}... from {dup.get('source', '?')})"
+                            )
+                            mills = entry.get('mills', 0)
+                            if mills > max_treatment_ms:
+                                max_treatment_ms = mills
+                            continue
+
                         # New treatment - enrich carb treatments with GI prediction
                         if doc.get('type') == 'carbs' and doc.get('carbs') and ENRICHMENT_AVAILABLE:
                             doc = await self._enrich_carb_treatment(doc)
