@@ -534,6 +534,9 @@ Safety rules:
 - CRITICAL: BG < 54 = "Treat NOW: 15-20g fast carbs (4oz juice, 4 glucose tabs)"
 - BG < 70 = Suggest specific fast carb source and amount
 - BG > 250 with no IOB = Calculate and suggest correction
+- CRITICAL: When TFT predictions are available, they ALREADY account for IOB, COB, and BG Pressure.
+  Do NOT predict BG values that contradict TFT predictions. If TFT says 102 at +60m, do NOT claim BG will drop below 85.
+  BG Pressure is an INPUT to TFT, not an independent prediction — trust TFT over raw BG Pressure extrapolation.
 - If TFT predictions show dropping below 80, warn about potential low
 - If SENSITIVE state + dropping trend = URGENT low warning
 - When uncertain, suggest waiting 15-30 minutes and rechecking"""
@@ -563,8 +566,8 @@ Safety rules:
 - Inferred treatments pending: {inferred_treatments}{weather_context}{absorption_context}
 
 Based on this data, what's the most important thing to know RIGHT NOW?
-Consider the ML predictions and confidence intervals in your analysis.
-If BG Pressure is negative, insulin is pushing BG down. If positive, carbs/protein are pushing up.
+CRITICAL: Use TFT predictions as the authoritative forecast — they already incorporate IOB, COB, and BG Pressure.
+Do NOT predict BG values that contradict TFT. BG Pressure shows the direction insulin/carbs are pushing, but TFT predictions are the actual forecast.
 IMPORTANT: If metabolic state is abnormal (sick/resistant/sensitive), mention it in your insight.
 Return ONLY JSON."""
 

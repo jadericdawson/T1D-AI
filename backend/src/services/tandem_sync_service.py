@@ -168,25 +168,37 @@ class TandemSyncService:
         except Exception:
             pass  # fall back to Eastern
 
-        # Battery and daily totals from most recent daily basal event
+        # Battery and pump IOB from most recent daily basal event
         if result.daily_basal_events:
             latest = result.daily_basal_events[-1]
             status["battery_percent"] = latest.battery_percent
             status["battery_millivolts"] = latest.battery_millivolts
-            status["daily_basal_units"] = latest.daily_basal_units
             status["pump_iob"] = latest.pump_iob
             status["battery_updated_at"] = latest.timestamp.isoformat()
 
-        # Daily bolus total from bolus events (today in user's local timezone)
+        # Daily totals: all computed from individual events using user's local timezone midnight
         today_local = now.astimezone(user_tz).replace(hour=0, minute=0, second=0, microsecond=0)
         today_start = today_local.astimezone(timezone.utc)
+
+        # Daily basal total from individual basal delivery events (timezone-aware)
+        daily_basal_u = sum(
+            b.delivered_units for b in result.basal_events
+            if b.delivered_units and b.delivered_units > 0 and b.timestamp >= today_start
+        )
+        if daily_basal_u > 0:
+            status["daily_basal_units"] = round(daily_basal_u, 2)
+
+        # Daily bolus total from bolus events (timezone-aware)
         daily_bolus_u = sum(
             b.insulin for b in result.bolus_events
             if b.insulin and b.insulin > 0 and b.timestamp >= today_start
         )
         if daily_bolus_u > 0:
             status["daily_bolus_units"] = round(daily_bolus_u, 2)
-            basal_u = status.get("daily_basal_units") or 0
+
+        # Daily total insulin
+        basal_u = status.get("daily_basal_units") or 0
+        if daily_bolus_u > 0 or basal_u > 0:
             status["daily_total_insulin"] = round(basal_u + daily_bolus_u, 2)
 
         # Current Control-IQ mode
