@@ -405,7 +405,7 @@ export default function MLModels() {
                         <div className="p-4 rounded-lg bg-muted/50">
                           <p className="text-xs text-muted-foreground">Range</p>
                           <p className="text-xl font-bold">
-                            {icrStatus.icr_range.min.toFixed(0)} - {icrStatus.icr_range.max.toFixed(0)}
+                            {icrStatus.icr_range.min?.toFixed(0) ?? '-'} - {icrStatus.icr_range.max?.toFixed(0) ?? '-'}
                           </p>
                           <p className="text-xs text-muted-foreground">g/U</p>
                         </div>
@@ -534,7 +534,7 @@ export default function MLModels() {
                         <div className="p-4 rounded-lg bg-muted/50">
                           <p className="text-xs text-muted-foreground">Range</p>
                           <p className="text-xl font-bold">
-                            {pirStatus.pir_range.min.toFixed(0)} - {pirStatus.pir_range.max.toFixed(0)}
+                            {pirStatus.pir_range.min?.toFixed(0) ?? '-'} - {pirStatus.pir_range.max?.toFixed(0) ?? '-'}
                           </p>
                           <p className="text-xs text-muted-foreground">g/U</p>
                         </div>
