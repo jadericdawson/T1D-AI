@@ -543,10 +543,10 @@ export default function Reports() {
                         return (
                           <tr key={d.date} className="border-b border-border/50 hover:bg-muted/30">
                             <td className="px-3 py-1.5 font-medium">{dayLabel}</td>
-                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-blue-400 border-blue-400/30 text-[10px]">{d.basal_units.toFixed(1)}U</Badge></td>
-                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-indigo-400 border-indigo-400/30 text-[10px]">{d.bolus_units.toFixed(1)}U</Badge> <span className="text-muted-foreground">({d.bolus_count})</span></td>
-                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-purple-400 border-purple-400/30 text-[10px]">{d.auto_correction_units.toFixed(1)}U</Badge> <span className="text-muted-foreground">({d.auto_correction_count})</span></td>
-                            <td className="px-2 py-1.5 text-right font-semibold">{d.total_insulin.toFixed(1)}U</td>
+                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-blue-400 border-blue-400/30 text-[10px]">{(d.basal_units ?? 0).toFixed(1)}U</Badge></td>
+                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-indigo-400 border-indigo-400/30 text-[10px]">{(d.bolus_units ?? 0).toFixed(1)}U</Badge> <span className="text-muted-foreground">({d.bolus_count})</span></td>
+                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-purple-400 border-purple-400/30 text-[10px]">{(d.auto_correction_units ?? 0).toFixed(1)}U</Badge> <span className="text-muted-foreground">({d.auto_correction_count})</span></td>
+                            <td className="px-2 py-1.5 text-right font-semibold">{(d.total_insulin ?? 0).toFixed(1)}U</td>
                             <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-orange-400 border-orange-400/30 text-[10px]">{d.carbs}g</Badge></td>
                             <td className="px-2 py-1.5 text-right text-muted-foreground">{d.meal_count}</td>
                             <td className={`px-2 py-1.5 text-right font-semibold ${d.avg_bg && d.avg_bg >= 70 && d.avg_bg <= 180 ? 'text-green-400' : 'text-yellow-400'}`}>{d.avg_bg ?? '-'}</td>
@@ -705,7 +705,7 @@ function TirBar({ width, color, label }: { width: number; color: string; label: 
   if (width < 0.5) return null
   return (
     <div className={`${color} flex items-center justify-center text-[10px] font-semibold text-white`} style={{ width: `${width}%`, minWidth: width > 3 ? undefined : '2px' }}>
-      {width > 4 ? `${label.toFixed(0)}%` : ''}
+      {width > 4 ? `${(label ?? 0).toFixed(0)}%` : ''}
     </div>
   )
 }
