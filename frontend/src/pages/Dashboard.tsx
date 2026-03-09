@@ -8,7 +8,7 @@ import { motion } from 'framer-motion'
 import {
   Activity, Clock, RefreshCw, Bell, Sparkles,
   Wifi, WifiOff, Loader2, TrendingUp, Layers,
-  MoreVertical, Pencil, Trash2
+  MoreVertical, Pencil, Trash2, FileBarChart
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
@@ -1419,6 +1419,12 @@ export default function Dashboard() {
               💉 Log Insulin
             </Button>
           </div>
+          <Link to="/reports" className="block">
+            <Button variant="outline" className="w-full border-indigo-500/30 text-indigo-400 hover:bg-indigo-500/10">
+              <FileBarChart className="w-4 h-4 mr-2" />
+              Pump Report
+            </Button>
+          </Link>
 
           {/* Last Sync Info - No animation */}
           {currentTimestamp && (

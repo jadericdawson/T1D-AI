@@ -7,6 +7,7 @@ import Settings from './pages/Settings'
 import MLModels from './pages/MLModels'
 import DataViewer from './pages/DataViewer'
 import Admin from './pages/Admin'
+import Reports from './pages/Reports'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import VerifyEmail from './pages/VerifyEmail'
@@ -105,6 +106,11 @@ function App() {
         <Route path="/data" element={
           <ProtectedRoute>
             <DataViewer />
+          </ProtectedRoute>
+        } />
+        <Route path="/reports" element={
+          <ProtectedRoute>
+            <Reports />
           </ProtectedRoute>
         } />
         <Route path="/admin" element={
