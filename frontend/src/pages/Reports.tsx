@@ -150,6 +150,12 @@ function loadChartJs(): Promise<void> {
   return chartJsPromise
 }
 
+// Safe number helper — handles null, undefined, NaN from API responses
+const n = (v: any, digits?: number): string => {
+  const num = Number(v ?? 0)
+  return digits != null ? (isNaN(num) ? '0' : num.toFixed(digits)) : (isNaN(num) ? '0' : String(num))
+}
+
 // ── Main Component ────────────────────────────────────────────────────────
 
 export default function Reports() {
@@ -248,9 +254,9 @@ export default function Reports() {
       data: {
         labels: days.map(d => { const dt = new Date(d.date + 'T12:00:00'); return dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }) }),
         datasets: [
-          { label: 'Basal', data: days.map(d => d.basal_units), backgroundColor: '#3b82f6', borderRadius: 3 },
-          { label: 'Bolus', data: days.map(d => d.bolus_units), backgroundColor: '#6366f1', borderRadius: 3 },
-          { label: 'Auto-Correction', data: days.map(d => d.auto_correction_units), backgroundColor: '#a855f7', borderRadius: 3 },
+          { label: 'Basal', data: days.map(d => d.basal_units ?? 0), backgroundColor: '#3b82f6', borderRadius: 3 },
+          { label: 'Bolus', data: days.map(d => d.bolus_units ?? 0), backgroundColor: '#6366f1', borderRadius: 3 },
+          { label: 'Auto-Correction', data: days.map(d => d.auto_correction_units ?? 0), backgroundColor: '#a855f7', borderRadius: 3 },
         ]
       },
       options: {
@@ -272,7 +278,7 @@ export default function Reports() {
       type: 'bar',
       data: {
         labels: days.map(d => { const dt = new Date(d.date + 'T12:00:00'); return dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }) }),
-        datasets: [{ label: 'Carbs', data: days.map(d => d.carbs), backgroundColor: 'rgba(249,115,22,0.7)', borderColor: '#f97316', borderWidth: 1, borderRadius: 6 }]
+        datasets: [{ label: 'Carbs', data: days.map(d => d.carbs ?? 0), backgroundColor: 'rgba(249,115,22,0.7)', borderColor: '#f97316', borderWidth: 1, borderRadius: 6 }]
       },
       options: {
         responsive: true, maintainAspectRatio: false,
@@ -293,7 +299,7 @@ export default function Reports() {
       data: {
         labels: r.hourly_patterns.map(h => `${h.hour.toString().padStart(2, '0')}:00`),
         datasets: [{
-          label: 'Avg Basal Rate', data: r.hourly_patterns.map(h => h.avg_basal_rate),
+          label: 'Avg Basal Rate', data: r.hourly_patterns.map(h => h.avg_basal_rate ?? 0),
           borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)',
           borderWidth: 2, pointRadius: 3, pointBackgroundColor: '#3b82f6', fill: true, tension: 0.4,
         }]
@@ -471,13 +477,13 @@ export default function Reports() {
                 <CardHeader className="pb-2"><CardTitle className="text-sm">Current Pump Status</CardTitle></CardHeader>
                 <CardContent>
                   <div className="grid grid-cols-3 md:grid-cols-6 gap-2">
-                    <PumpStatusItem label="Battery" value={report.pump_status.battery_percent != null ? `${report.pump_status.battery_percent.toFixed(0)}%` : '-'}
+                    <PumpStatusItem label="Battery" value={report.pump_status.battery_percent != null ? `${n(report.pump_status.battery_percent, 0)}%` : '-'}
                       color={report.pump_status.battery_percent && report.pump_status.battery_percent > 30 ? 'text-green-400' : 'text-red-400'} />
                     <PumpStatusItem label="Mode" value={report.pump_status.control_mode || '-'} color="text-green-400" />
-                    <PumpStatusItem label="IOB" value={report.pump_status.pump_iob != null ? `${report.pump_status.pump_iob.toFixed(2)}U` : '-'} color="text-indigo-400" />
-                    <PumpStatusItem label="Today Basal" value={report.pump_status.daily_basal_units != null ? `${report.pump_status.daily_basal_units.toFixed(2)}U` : '-'} color="text-blue-400" />
-                    <PumpStatusItem label="Today Bolus" value={report.pump_status.daily_bolus_units != null ? `${report.pump_status.daily_bolus_units.toFixed(2)}U` : '-'} color="text-indigo-400" />
-                    <PumpStatusItem label="Today Total" value={report.pump_status.daily_total_insulin != null ? `${report.pump_status.daily_total_insulin.toFixed(2)}U` : '-'} color="text-white" />
+                    <PumpStatusItem label="IOB" value={report.pump_status.pump_iob != null ? `${n(report.pump_status.pump_iob, 2)}U` : '-'} color="text-indigo-400" />
+                    <PumpStatusItem label="Today Basal" value={report.pump_status.daily_basal_units != null ? `${n(report.pump_status.daily_basal_units, 2)}U` : '-'} color="text-blue-400" />
+                    <PumpStatusItem label="Today Bolus" value={report.pump_status.daily_bolus_units != null ? `${n(report.pump_status.daily_bolus_units, 2)}U` : '-'} color="text-indigo-400" />
+                    <PumpStatusItem label="Today Total" value={report.pump_status.daily_total_insulin != null ? `${n(report.pump_status.daily_total_insulin, 2)}U` : '-'} color="text-white" />
                   </div>
                 </CardContent>
               </Card>
@@ -543,16 +549,16 @@ export default function Reports() {
                         return (
                           <tr key={d.date} className="border-b border-border/50 hover:bg-muted/30">
                             <td className="px-3 py-1.5 font-medium">{dayLabel}</td>
-                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-blue-400 border-blue-400/30 text-[10px]">{(d.basal_units ?? 0).toFixed(1)}U</Badge></td>
-                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-indigo-400 border-indigo-400/30 text-[10px]">{(d.bolus_units ?? 0).toFixed(1)}U</Badge> <span className="text-muted-foreground">({d.bolus_count})</span></td>
-                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-purple-400 border-purple-400/30 text-[10px]">{(d.auto_correction_units ?? 0).toFixed(1)}U</Badge> <span className="text-muted-foreground">({d.auto_correction_count})</span></td>
-                            <td className="px-2 py-1.5 text-right font-semibold">{(d.total_insulin ?? 0).toFixed(1)}U</td>
-                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-orange-400 border-orange-400/30 text-[10px]">{d.carbs}g</Badge></td>
-                            <td className="px-2 py-1.5 text-right text-muted-foreground">{d.meal_count}</td>
-                            <td className={`px-2 py-1.5 text-right font-semibold ${d.avg_bg && d.avg_bg >= 70 && d.avg_bg <= 180 ? 'text-green-400' : 'text-yellow-400'}`}>{d.avg_bg ?? '-'}</td>
-                            <td className={`px-2 py-1.5 text-right font-semibold ${d.tir && d.tir >= 70 ? 'text-green-400' : d.tir && d.tir >= 50 ? 'text-yellow-400' : 'text-red-400'}`}>{d.tir != null ? `${d.tir.toFixed(0)}%` : '-'}</td>
-                            <td className={`px-2 py-1.5 text-right ${d.time_low && d.time_low > 4 ? 'text-red-400' : 'text-muted-foreground'}`}>{d.time_low != null ? `${d.time_low.toFixed(0)}%` : '-'}</td>
-                            <td className={`px-2 py-1.5 text-right ${d.time_high && d.time_high > 25 ? 'text-orange-400' : 'text-muted-foreground'}`}>{d.time_high != null ? `${d.time_high.toFixed(0)}%` : '-'}</td>
+                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-blue-400 border-blue-400/30 text-[10px]">{n(d.basal_units, 1)}U</Badge></td>
+                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-indigo-400 border-indigo-400/30 text-[10px]">{n(d.bolus_units, 1)}U</Badge> <span className="text-muted-foreground">({d.bolus_count ?? 0})</span></td>
+                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-purple-400 border-purple-400/30 text-[10px]">{n(d.auto_correction_units, 1)}U</Badge> <span className="text-muted-foreground">({d.auto_correction_count ?? 0})</span></td>
+                            <td className="px-2 py-1.5 text-right font-semibold">{n(d.total_insulin, 1)}U</td>
+                            <td className="px-2 py-1.5 text-right"><Badge variant="outline" className="text-orange-400 border-orange-400/30 text-[10px]">{n(d.carbs)}g</Badge></td>
+                            <td className="px-2 py-1.5 text-right text-muted-foreground">{d.meal_count ?? 0}</td>
+                            <td className={`px-2 py-1.5 text-right font-semibold ${d.avg_bg && d.avg_bg >= 70 && d.avg_bg <= 180 ? 'text-green-400' : 'text-yellow-400'}`}>{d.avg_bg != null ? n(d.avg_bg) : '-'}</td>
+                            <td className={`px-2 py-1.5 text-right font-semibold ${d.tir && d.tir >= 70 ? 'text-green-400' : d.tir && d.tir >= 50 ? 'text-yellow-400' : 'text-red-400'}`}>{d.tir != null ? `${n(d.tir, 0)}%` : '-'}</td>
+                            <td className={`px-2 py-1.5 text-right ${d.time_low && d.time_low > 4 ? 'text-red-400' : 'text-muted-foreground'}`}>{d.time_low != null ? `${n(d.time_low, 0)}%` : '-'}</td>
+                            <td className={`px-2 py-1.5 text-right ${d.time_high && d.time_high > 25 ? 'text-orange-400' : 'text-muted-foreground'}`}>{d.time_high != null ? `${n(d.time_high, 0)}%` : '-'}</td>
                           </tr>
                         )
                       })}
@@ -582,7 +588,7 @@ export default function Reports() {
                           <tr key={i} className="border-b border-border/50">
                             <td className="px-3 py-1.5">{b.time}</td>
                             <td className="px-2 py-1.5"><Badge variant="outline" className="text-indigo-400 border-indigo-400/30 text-[10px]">{b.type}</Badge></td>
-                            <td className="px-2 py-1.5 text-right font-semibold">{b.units}U</td>
+                            <td className="px-2 py-1.5 text-right font-semibold">{n(b.units, 1)}U</td>
                             <td className="px-2 py-1.5 text-muted-foreground truncate max-w-[120px]">{b.notes || '-'}</td>
                           </tr>
                         ))}
@@ -609,7 +615,7 @@ export default function Reports() {
                           <tr key={i} className="border-b border-border/50">
                             <td className="px-3 py-1.5">{m.time}</td>
                             <td className="px-2 py-1.5 text-right">
-                              <Badge variant="outline" className={`text-[10px] ${m.carbs <= 20 ? 'text-green-400 border-green-400/30' : m.carbs <= 50 ? 'text-yellow-400 border-yellow-400/30' : 'text-red-400 border-red-400/30'}`}>{m.carbs}g</Badge>
+                              <Badge variant="outline" className={`text-[10px] ${(m.carbs ?? 0) <= 20 ? 'text-green-400 border-green-400/30' : (m.carbs ?? 0) <= 50 ? 'text-yellow-400 border-yellow-400/30' : 'text-red-400 border-red-400/30'}`}>{n(m.carbs)}g</Badge>
                             </td>
                             <td className="px-2 py-1.5 text-muted-foreground truncate max-w-[200px]">{m.notes || '-'}</td>
                           </tr>
@@ -639,7 +645,7 @@ export default function Reports() {
                         {report.bolus_events.filter(b => b.type === 'auto_correction').map((b, i) => (
                           <tr key={i} className="border-b border-border/50">
                             <td className="px-3 py-1.5">{b.time}</td>
-                            <td className="px-2 py-1.5 text-right font-semibold text-purple-400">{b.units}U</td>
+                            <td className="px-2 py-1.5 text-right font-semibold text-purple-400">{n(b.units, 1)}U</td>
                             <td className="px-2 py-1.5 text-muted-foreground">{b.notes || '-'}</td>
                           </tr>
                         ))}
@@ -652,7 +658,7 @@ export default function Reports() {
 
             {/* Footer */}
             <p className="text-center text-xs text-muted-foreground py-4">
-              Generated {new Date().toLocaleString()} &middot; {report.total_readings.toLocaleString()} glucose readings &middot; {report.daily_summaries.reduce((s, d) => s + d.meal_count + d.bolus_count + d.auto_correction_count, 0)} treatment events
+              Generated {new Date().toLocaleString()} &middot; {(report.total_readings ?? 0).toLocaleString()} glucose readings &middot; {report.daily_summaries.reduce((s, d) => s + (d.meal_count ?? 0) + (d.bolus_count ?? 0) + (d.auto_correction_count ?? 0), 0)} treatment events
             </p>
 
             <div className="h-20" />
@@ -695,8 +701,8 @@ function InsulinSplitBox({ label, value, pct, color }: { label: string; value: n
   return (
     <div className={`rounded-lg p-3 text-center ${color}`}>
       <div className="text-[10px] font-semibold uppercase tracking-wider mb-1">{label}</div>
-      <div className="text-xl font-bold">{value}U</div>
-      <div className="text-[10px] opacity-70">{pct}%</div>
+      <div className="text-xl font-bold">{n(value, 1)}U</div>
+      <div className="text-[10px] opacity-70">{n(pct, 0)}%</div>
     </div>
   )
 }
@@ -705,7 +711,7 @@ function TirBar({ width, color, label }: { width: number; color: string; label: 
   if (width < 0.5) return null
   return (
     <div className={`${color} flex items-center justify-center text-[10px] font-semibold text-white`} style={{ width: `${width}%`, minWidth: width > 3 ? undefined : '2px' }}>
-      {width > 4 ? `${(label ?? 0).toFixed(0)}%` : ''}
+      {width > 4 ? `${n(label, 0)}%` : ''}
     </div>
   )
 }

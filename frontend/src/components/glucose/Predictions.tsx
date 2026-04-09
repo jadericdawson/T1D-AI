@@ -178,12 +178,12 @@ function PredictedBGRow({ effectCurve, tftPredictions }: { effectCurve: EffectPo
               <span
                 className="font-semibold text-sm"
                 style={{ color: getGlucoseColor(pred.value) }}
-                title={`+${pred.actualHorizon}min: ${Math.round(pred.value)} mg/dL${pred.tftDelta !== undefined ? ` (TFT: ${pred.tftDelta >= 0 ? '+' : ''}${pred.tftDelta.toFixed(1)})` : ''}`}
+                title={`+${pred.actualHorizon}min: ${Math.round(pred.value)} mg/dL${pred.tftDelta != null ? ` (TFT: ${pred.tftDelta >= 0 ? '+' : ''}${pred.tftDelta.toFixed(1)})` : ''}`}
               >
                 {Math.round(pred.value)}
               </span>
               {/* Show TFT delta next to prediction */}
-              {pred.tftDelta !== undefined && (
+              {pred.tftDelta != null && (
                 <span
                   className={cn(
                     "text-[10px] ml-0.5",
