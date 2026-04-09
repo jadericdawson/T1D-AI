@@ -48,7 +48,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("azure_openai_key", "gpt41_api_key")
     )
     azure_openai_deployment: str = Field(
-        default="H4D_Assistant_gpt-4.1",
+        default="gpt-5-4-mini",
         validation_alias=AliasChoices("azure_openai_deployment", "gpt41_deployment")
     )
     azure_openai_api_version: str = Field(default="2024-12-01-preview")
