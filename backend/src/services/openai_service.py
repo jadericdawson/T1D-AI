@@ -135,7 +135,7 @@ Return ONLY a JSON array, no other text."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=800,
+                max_completion_tokens=800,
                 response_format={"type": "json_object"}
             )
 
@@ -217,7 +217,7 @@ Provide analysis and suggestions."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.5,
-                max_tokens=400,
+                max_completion_tokens=400,
                 response_format={"type": "json_object"}
             )
 
@@ -269,7 +269,7 @@ Generate an encouraging weekly summary."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.7,
-                max_tokens=300,
+                max_completion_tokens=300,
                 response_format={"type": "json_object"}
             )
 
@@ -579,7 +579,7 @@ Return ONLY JSON."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.3,  # Lower for more consistent advice
-                max_tokens=300,
+                max_completion_tokens=300,
                 response_format={"type": "json_object"}
             )
 
@@ -725,7 +725,7 @@ Be precise with the GI number. Return ONLY JSON."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.2,  # Low temperature for more consistent/accurate values
-                max_tokens=300,
+                max_completion_tokens=300,
                 response_format={"type": "json_object"}
             )
 
@@ -852,7 +852,7 @@ Return ONLY JSON."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.3,
-                max_tokens=250,
+                max_completion_tokens=250,
                 response_format={"type": "json_object"}
             )
 
@@ -1023,7 +1023,7 @@ Provide a specific, calculated answer. Show your math. Return ONLY JSON."""
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.3,
-                max_tokens=600,
+                max_completion_tokens=600,
                 response_format={"type": "json_object"}
             )
 
