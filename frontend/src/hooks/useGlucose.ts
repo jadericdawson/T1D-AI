@@ -333,7 +333,7 @@ export function useRealtimeInsight(params: {
   } = params
 
   return useQuery({
-    queryKey: ['insights', 'realtime', currentBg, iob, cob, isf, icr, pir, dose, bgPressure],
+    queryKey: ['insights', 'realtime'],
     queryFn: () => insightsApi.getRealtime({
       currentBg: currentBg!,
       trend,
@@ -350,8 +350,9 @@ export function useRealtimeInsight(params: {
       absorptionRate,
     }),
     enabled: enabled && currentBg !== undefined && currentBg > 0,
-    staleTime: 60000, // 1 minute - refresh frequently for dynamic advice
-    refetchInterval: 120000, // Auto-refresh every 2 minutes
+    staleTime: 300000, // 5 minutes - reuse cached response within window
+    refetchInterval: 300000, // Refresh every 5 minutes, not on every BG update
+    refetchIntervalInBackground: false, // Never poll when tab is hidden
     retry: 1, // Only retry once on failure
   })
 }
