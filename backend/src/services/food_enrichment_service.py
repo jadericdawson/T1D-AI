@@ -361,7 +361,7 @@ Return JSON with PRECISE GI value:
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.2,  # Lower temp for more consistent/accurate GI values
-            max_tokens=250,
+            max_completion_tokens=250,
             response_format={"type": "json_object"}
         )
 
@@ -509,7 +509,7 @@ Return JSON:
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.3,
-                max_tokens=250,
+                max_completion_tokens=250,
                 response_format={"type": "json_object"}
             )
 
@@ -670,7 +670,7 @@ Return JSON:
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.2,  # Low temp for consistent nutrition estimates
-            max_tokens=300,
+            max_completion_tokens=300,
             response_format={"type": "json_object"}
         )
 

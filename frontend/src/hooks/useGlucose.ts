@@ -2,6 +2,7 @@
  * React Query hooks for glucose data
  * User authentication is handled via JWT token in request headers
  */
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   glucoseApi,
@@ -307,6 +308,36 @@ export function useInsights(limit: number = 10) {
 }
 
 /**
+ * Tracks whether the user has interacted with the page recently.
+ * Returns false after `timeoutMs` of no mouse/touch/keyboard/scroll activity.
+ * Used to gate AI polling so calls only happen when someone is actively using the app.
+ */
+function useUserActivity(timeoutMs = 300000): boolean {
+  const [isActive, setIsActive] = useState(true)
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>
+
+    const reset = () => {
+      setIsActive(true)
+      clearTimeout(timer)
+      timer = setTimeout(() => setIsActive(false), timeoutMs)
+    }
+
+    const events = ['mousedown', 'mousemove', 'touchstart', 'keypress', 'scroll', 'click']
+    events.forEach(e => window.addEventListener(e, reset, { passive: true }))
+    reset() // start the timer immediately
+
+    return () => {
+      events.forEach(e => window.removeEventListener(e, reset))
+      clearTimeout(timer)
+    }
+  }, [timeoutMs])
+
+  return isActive
+}
+
+/**
  * Hook for real-time AI insights that update when data changes.
  * Provides actionable advice based on current BG, IOB, COB, ISF, ICR, PIR, dose, and TFT predictions.
  * Enhanced with BG Pressure, TFT predictions, and GI data for better advice.
@@ -332,8 +363,10 @@ export function useRealtimeInsight(params: {
     isf, icr, pir, dose, bgPressure, tftPredictions, recentGI, absorptionRate
   } = params
 
+  const isUserActive = useUserActivity(300000) // 5 min idle timeout
+
   return useQuery({
-    queryKey: ['insights', 'realtime', currentBg, iob, cob, isf, icr, pir, dose, bgPressure],
+    queryKey: ['insights', 'realtime'],
     queryFn: () => insightsApi.getRealtime({
       currentBg: currentBg!,
       trend,
@@ -349,9 +382,10 @@ export function useRealtimeInsight(params: {
       recentGI,
       absorptionRate,
     }),
-    enabled: enabled && currentBg !== undefined && currentBg > 0,
-    staleTime: 60000, // 1 minute - refresh frequently for dynamic advice
-    refetchInterval: 120000, // Auto-refresh every 2 minutes
+    enabled: enabled && currentBg !== undefined && currentBg > 0 && isUserActive,
+    staleTime: 300000, // 5 minutes - reuse cached response within window
+    refetchInterval: isUserActive ? 300000 : false, // stop polling when idle
+    refetchIntervalInBackground: false, // Never poll when tab is hidden
     retry: 1, // Only retry once on failure
   })
 }
