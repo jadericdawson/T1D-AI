@@ -475,6 +475,14 @@ class GlurooSyncService:
         If protein/fat are not provided from Gluroo but we have food notes,
         uses GPT-4.1 to estimate them from the food description.
         """
+        # Skip if already enriched in a prior sync cycle
+        if doc.get('enrichedAt'):
+            logger.debug(
+                f"Skipping enrichment for already-enriched treatment: "
+                f"{doc.get('notes', 'no notes')[:40]} (enriched at {doc['enrichedAt']})"
+            )
+            return doc
+
         try:
             carbs = doc.get('carbs', 0)
             protein = doc.get('protein', 0) or 0
@@ -674,8 +682,8 @@ class GlurooSyncService:
                                 max_treatment_ms = mills
                             continue
 
-                        # New treatment - enrich carb treatments with GI prediction
-                        if doc.get('type') == 'carbs' and doc.get('carbs') and ENRICHMENT_AVAILABLE:
+                        # New treatment - enrich carb treatments with GI prediction (skip if already enriched)
+                        if doc.get('type') == 'carbs' and doc.get('carbs') and ENRICHMENT_AVAILABLE and not doc.get('enrichedAt'):
                             doc = await self._enrich_carb_treatment(doc)
 
                     self.treatment_container.upsert_item(doc)

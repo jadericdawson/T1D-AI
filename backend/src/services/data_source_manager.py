@@ -317,9 +317,18 @@ class DataSourceManager:
                     # Enrich carb treatments with AI-estimated GI, macros, absorption rate
                     if ENRICHMENT_AVAILABLE:
                         for treatment in treatments:
+                            # Skip already-enriched treatments and notes that are just
+                            # carb amounts like "Food: 55g" with no real food description
+                            notes = (treatment.notes or '').strip()
+                            has_real_food_desc = (
+                                notes
+                                and not notes.startswith('Food:')
+                                and len(notes) > 5
+                            )
                             if (treatment.type == 'carbs' and treatment.carbs
-                                    and treatment.notes and treatment.notes.strip()
-                                    and not treatment.glycemicIndex):
+                                    and has_real_food_desc
+                                    and not treatment.glycemicIndex
+                                    and not getattr(treatment, 'enrichedAt', None)):
                                 try:
                                     await food_enrichment_service.initialize()
 

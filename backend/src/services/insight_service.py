@@ -3,6 +3,7 @@ Insight Generation Service
 Coordinates AI insight generation and pattern detection.
 """
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
@@ -37,6 +38,24 @@ class AnomalyDetection:
 
 class InsightService:
     """Service for generating and managing AI insights."""
+
+    def __init__(self):
+        # TTL cache for realtime insights: {cache_key: (monotonic_ts, result)}
+        self._realtime_cache: Dict[str, tuple] = {}
+        self._realtime_cache_ttl = 300  # 5 minutes
+
+    def _realtime_cache_key(self, user_id: str, current_bg: float, trend: str) -> str:
+        """Cache key from user + rounded BG (nearest 5 mg/dL) + trend."""
+        rounded_bg = round(current_bg / 5) * 5
+        return f"{user_id}:{rounded_bg}:{trend}"
+
+    def _clean_realtime_cache(self):
+        """Remove expired entries."""
+        now = time.monotonic()
+        expired = [k for k, (ts, _) in self._realtime_cache.items()
+                   if now - ts > self._realtime_cache_ttl]
+        for k in expired:
+            del self._realtime_cache[k]
 
     async def generate_insights(
         self,
@@ -710,6 +729,20 @@ class InsightService:
         Returns:
             Real-time insight with advice
         """
+        # Check realtime cache — return cached result if BG hasn't changed meaningfully
+        cache_key = self._realtime_cache_key(user_id, current_bg, trend)
+        now = time.monotonic()
+        cached = self._realtime_cache.get(cache_key)
+        if cached:
+            cached_time, cached_result = cached
+            if now - cached_time < self._realtime_cache_ttl:
+                logger.debug(f"Realtime insight cache HIT for {user_id} (bg~{round(current_bg/5)*5}, {trend})")
+                return cached_result
+            else:
+                del self._realtime_cache[cache_key]
+        if len(self._realtime_cache) > 100:
+            self._clean_realtime_cache()
+
         try:
             # Fetch prediction accuracy stats (non-blocking, fails gracefully)
             prediction_accuracy = None
@@ -747,13 +780,16 @@ class InsightService:
             # Use GPT to generate real-time advice
             insight = await openai_service.generate_realtime_insight(context)
 
-            return {
+            result = {
                 "insight": insight.get("message", ""),
                 "urgency": insight.get("urgency", "normal"),  # low, normal, high, critical
                 "action": insight.get("action"),  # Suggested action if any
                 "reasoning": insight.get("reasoning", ""),
                 "generatedAt": datetime.utcnow().isoformat()
             }
+            # Cache for 5 min keyed on user + rounded BG + trend
+            self._realtime_cache[cache_key] = (time.monotonic(), result)
+            return result
 
         except Exception as e:
             logger.error(f"Error generating real-time insight: {e}")

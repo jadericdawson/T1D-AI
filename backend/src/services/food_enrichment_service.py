@@ -173,6 +173,8 @@ class FoodEnrichmentService:
         self.client: Optional[AsyncAzureOpenAI] = None
         self._initialized = False
         self._cache: Dict[str, FoodFeatures] = {}
+        self._macro_cache: Dict[str, 'MacroEstimate'] = {}
+        self._cache_max_size = 500
 
     async def initialize(self):
         """Initialize the Azure OpenAI client."""
@@ -577,9 +579,15 @@ Return JSON:
             "enrichedAt": datetime.utcnow().isoformat()
         }
 
+    def _evict_if_full(self, cache: dict):
+        """Evict oldest entries when cache exceeds max size."""
+        while len(cache) > self._cache_max_size:
+            del cache[next(iter(cache))]
+
     def clear_cache(self):
-        """Clear the food features cache."""
+        """Clear all food caches."""
         self._cache.clear()
+        self._macro_cache.clear()
 
     async def estimate_macros_from_description(
         self,
@@ -602,6 +610,14 @@ Return JSON:
         if not food_description or not food_description.strip():
             return self._default_macro_estimate(known_carbs)
 
+        # Check macro cache first
+        macro_cache_key = food_description.lower().strip()
+        if known_carbs is not None:
+            macro_cache_key = f"{macro_cache_key}:{int(known_carbs)}"
+        if macro_cache_key in self._macro_cache:
+            logger.debug(f"Macro cache HIT: '{food_description[:40]}'")
+            return self._macro_cache[macro_cache_key]
+
         await self._ensure_initialized()
 
         if not self.client:
@@ -609,7 +625,10 @@ Return JSON:
             return self._default_macro_estimate(known_carbs)
 
         try:
-            return await self._query_gpt_for_macros(food_description, known_carbs)
+            result = await self._query_gpt_for_macros(food_description, known_carbs)
+            self._macro_cache[macro_cache_key] = result
+            self._evict_if_full(self._macro_cache)
+            return result
         except Exception as e:
             logger.error(f"GPT macro estimation failed: {e}")
             return self._default_macro_estimate(known_carbs)
